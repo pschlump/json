@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"encoding"
 	"encoding/base64"
+	"fmt"
 	"math"
 	"reflect"
 	"runtime"
@@ -644,19 +645,45 @@ func encodeByteSlice(e *encodeState, v reflect.Value, _ bool) {
 	}
 	s := v.Bytes()
 	e.WriteByte('"')
-	if len(s) < 1024 {
-		// for small buffers, using Encode directly is much faster.
-		dst := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
-		base64.StdEncoding.Encode(dst, s)
-		e.Write(dst)
+	if EncodeByteAsBase64 {
+		if len(s) < 1024 {
+			// for small buffers, using Encode directly is much faster.
+			dst := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
+			base64.StdEncoding.Encode(dst, s)
+			e.Write(dst)
+		} else {
+			// for large buffers, avoid unnecessary extra temporary
+			// buffer space.
+			enc := base64.NewEncoder(base64.StdEncoding, e)
+			enc.Write(s)
+			enc.Close()
+		}
 	} else {
-		// for large buffers, avoid unnecessary extra temporary
-		// buffer space.
-		enc := base64.NewEncoder(base64.StdEncoding, e)
-		enc.Write(s)
-		enc.Close()
+		e.Write(Cleanup(s))
 	}
 	e.WriteByte('"')
+}
+
+func Cleanup(s []byte) (rv []byte) {
+	// rv = s
+	for _, c := range s {
+		if c == '\n' {
+			rv = append(rv, '\\')
+			rv = append(rv, 'n')
+		} else if c == '\r' {
+			rv = append(rv, '\\')
+			rv = append(rv, 'r')
+		} else if c < ' ' {
+			rv = append(rv, '\\')
+			s := fmt.Sprintf("%02x", c)
+			rv = append(rv, 'x')
+			rv = append(rv, s[0])
+			rv = append(rv, s[1])
+		} else {
+			rv = append(rv, c)
+		}
+	}
+	return
 }
 
 // sliceEncoder just wraps an arrayEncoder, checking to make sure the value isn't nil.
@@ -1202,3 +1229,5 @@ func cachedTypeFields(t reflect.Type) []field {
 	fieldCache.Unlock()
 	return f
 }
+
+var EncodeByteAsBase64 = false
