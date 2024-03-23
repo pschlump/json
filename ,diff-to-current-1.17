@@ -1,0 +1,3802 @@
+16c16,18
+< 	"io/ioutil"
+---
+> 	"fmt"
+> 	"internal/testenv"
+> 	"io"
+17a20,21
+> 	"reflect"
+> 	"runtime"
+18a23
+> 	"sync"
+50c55
+< 	data, err := ioutil.ReadAll(gz)
+---
+> 	data, err := io.ReadAll(gz)
+79a85
+> 	b.ReportAllocs()
+86c92
+< 		enc := NewEncoder(ioutil.Discard)
+---
+> 		enc := NewEncoder(io.Discard)
+96a103
+> 	b.ReportAllocs()
+111a119,147
+> func benchMarshalBytes(n int) func(*testing.B) {
+> 	sample := []byte("hello world")
+> 	// Use a struct pointer, to avoid an allocation when passing it as an
+> 	// interface parameter to Marshal.
+> 	v := &struct {
+> 		Bytes []byte
+> 	}{
+> 		bytes.Repeat(sample, (n/len(sample))+1)[:n],
+> 	}
+> 	return func(b *testing.B) {
+> 		for i := 0; i < b.N; i++ {
+> 			if _, err := Marshal(v); err != nil {
+> 				b.Fatal("Marshal:", err)
+> 			}
+> 		}
+> 	}
+> }
+> 
+> func BenchmarkMarshalBytes(b *testing.B) {
+> 	b.ReportAllocs()
+> 	// 32 fits within encodeState.scratch.
+> 	b.Run("32", benchMarshalBytes(32))
+> 	// 256 doesn't fit in encodeState.scratch, but is small enough to
+> 	// allocate and avoid the slower base64.NewEncoder.
+> 	b.Run("256", benchMarshalBytes(256))
+> 	// 4096 is large enough that we want to avoid allocating for it.
+> 	b.Run("4096", benchMarshalBytes(4096))
+> }
+> 
+112a149
+> 	b.ReportAllocs()
+135a173,188
+> func BenchmarkUnicodeDecoder(b *testing.B) {
+> 	b.ReportAllocs()
+> 	j := []byte(`"\uD83D\uDE01"`)
+> 	b.SetBytes(int64(len(j)))
+> 	r := bytes.NewReader(j)
+> 	dec := NewDecoder(r)
+> 	var out string
+> 	b.ResetTimer()
+> 	for i := 0; i < b.N; i++ {
+> 		if err := dec.Decode(&out); err != nil {
+> 			b.Fatal("Decode:", err)
+> 		}
+> 		r.Seek(0, 0)
+> 	}
+> }
+> 
+136a190
+> 	b.ReportAllocs()
+158a213
+> 	b.ReportAllocs()
+175a231
+> 	b.ReportAllocs()
+189c245
+< 	// TODO(bcmills): Is there a missing b.SetBytes here?
+---
+> 	b.SetBytes(int64(len(codeJSON)))
+192a249
+> 	b.ReportAllocs()
+204a262
+> 	b.ReportAllocs()
+216a275
+> 	b.ReportAllocs()
+240a300,315
+> func BenchmarkIssue34127(b *testing.B) {
+> 	b.ReportAllocs()
+> 	j := struct {
+> 		Bar string `json:"bar,string"`
+> 	}{
+> 		Bar: `foobar`,
+> 	}
+> 	b.RunParallel(func(pb *testing.PB) {
+> 		for pb.Next() {
+> 			if _, err := Marshal(&j); err != nil {
+> 				b.Fatal(err)
+> 			}
+> 		}
+> 	})
+> }
+> 
+252a328,410
+> 
+> func BenchmarkTypeFieldsCache(b *testing.B) {
+> 	b.ReportAllocs()
+> 	var maxTypes int = 1e6
+> 	if testenv.Builder() != "" {
+> 		maxTypes = 1e3 // restrict cache sizes on builders
+> 	}
+> 
+> 	// Dynamically generate many new types.
+> 	types := make([]reflect.Type, maxTypes)
+> 	fs := []reflect.StructField{{
+> 		Type:  reflect.TypeOf(""),
+> 		Index: []int{0},
+> 	}}
+> 	for i := range types {
+> 		fs[0].Name = fmt.Sprintf("TypeFieldsCache%d", i)
+> 		types[i] = reflect.StructOf(fs)
+> 	}
+> 
+> 	// clearClear clears the cache. Other JSON operations, must not be running.
+> 	clearCache := func() {
+> 		fieldCache = sync.Map{}
+> 	}
+> 
+> 	// MissTypes tests the performance of repeated cache misses.
+> 	// This measures the time to rebuild a cache of size nt.
+> 	for nt := 1; nt <= maxTypes; nt *= 10 {
+> 		ts := types[:nt]
+> 		b.Run(fmt.Sprintf("MissTypes%d", nt), func(b *testing.B) {
+> 			nc := runtime.GOMAXPROCS(0)
+> 			for i := 0; i < b.N; i++ {
+> 				clearCache()
+> 				var wg sync.WaitGroup
+> 				for j := 0; j < nc; j++ {
+> 					wg.Add(1)
+> 					go func(j int) {
+> 						for _, t := range ts[(j*len(ts))/nc : ((j+1)*len(ts))/nc] {
+> 							cachedTypeFields(t)
+> 						}
+> 						wg.Done()
+> 					}(j)
+> 				}
+> 				wg.Wait()
+> 			}
+> 		})
+> 	}
+> 
+> 	// HitTypes tests the performance of repeated cache hits.
+> 	// This measures the average time of each cache lookup.
+> 	for nt := 1; nt <= maxTypes; nt *= 10 {
+> 		// Pre-warm a cache of size nt.
+> 		clearCache()
+> 		for _, t := range types[:nt] {
+> 			cachedTypeFields(t)
+> 		}
+> 		b.Run(fmt.Sprintf("HitTypes%d", nt), func(b *testing.B) {
+> 			b.RunParallel(func(pb *testing.PB) {
+> 				for pb.Next() {
+> 					cachedTypeFields(types[0])
+> 				}
+> 			})
+> 		})
+> 	}
+> }
+> 
+> func BenchmarkEncodeMarshaler(b *testing.B) {
+> 	b.ReportAllocs()
+> 
+> 	m := struct {
+> 		A int
+> 		B RawMessage
+> 	}{}
+> 
+> 	b.RunParallel(func(pb *testing.PB) {
+> 		enc := NewEncoder(io.Discard)
+> 
+> 		for pb.Next() {
+> 			if err := enc.Encode(&m); err != nil {
+> 				b.Fatal("Encode:", err)
+> 			}
+> 		}
+> 	})
+> }
+11d10
+< 	"bytes"
+14d12
+< 	"errors"
+17d14
+< 	"runtime"
+18a16
+> 	"strings"
+47,48c45,47
+< // preferring an exact match but also accepting a case-insensitive match.
+< // Unmarshal will only set exported fields of the struct.
+---
+> // preferring an exact match but also accepting a case-insensitive match. By
+> // default, object keys which don't have a corresponding struct field are
+> // ignored (see Decoder.DisallowUnknownFields for an alternative).
+76c75,76
+< // either be a string, an integer, or implement encoding.TextUnmarshaler.
+---
+> // either be any string type, an integer, implement json.Unmarshaler, or
+> // implement encoding.TextUnmarshaler.
+129c129
+< 	Field  string       // name of the field holding the Go value
+---
+> 	Field  string       // the full path from root node to the field
+141c141,142
+< // (No longer used; kept for compatibility.)
+---
+> //
+> // Deprecated: No longer used; kept for compatibility.
+169,178c170
+< func (d *decodeState) unmarshal(v interface{}) (err error) {
+< 	defer func() {
+< 		if r := recover(); r != nil {
+< 			if _, ok := r.(runtime.Error); ok {
+< 				panic(r)
+< 			}
+< 			err = r.(error)
+< 		}
+< 	}()
+< 
+---
+> func (d *decodeState) unmarshal(v interface{}) error {
+184a177
+> 	d.scanWhile(scanSkipSpace)
+187c180,183
+< 	d.value(rv)
+---
+> 	err := d.value(rv)
+> 	if err != nil {
+> 		return d.addErrorContext(err)
+> 	}
+207,264c203,206
+< // isValidNumber reports whether s is a valid JSON number literal.
+< func isValidNumber(s string) bool {
+< 	// This function implements the JSON numbers grammar.
+< 	// See https://tools.ietf.org/html/rfc7159#section-6
+< 	// and http://json.org/number.gif
+< 
+< 	if s == "" {
+< 		return false
+< 	}
+< 
+< 	// Optional -
+< 	if s[0] == '-' {
+< 		s = s[1:]
+< 		if s == "" {
+< 			return false
+< 		}
+< 	}
+< 
+< 	// Digits
+< 	switch {
+< 	default:
+< 		return false
+< 
+< 	case s[0] == '0':
+< 		s = s[1:]
+< 
+< 	case '1' <= s[0] && s[0] <= '9':
+< 		s = s[1:]
+< 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+< 			s = s[1:]
+< 		}
+< 	}
+< 
+< 	// . followed by 1 or more digits.
+< 	if len(s) >= 2 && s[0] == '.' && '0' <= s[1] && s[1] <= '9' {
+< 		s = s[2:]
+< 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+< 			s = s[1:]
+< 		}
+< 	}
+< 
+< 	// e or E followed by an optional - or + and
+< 	// 1 or more digits.
+< 	if len(s) >= 2 && (s[0] == 'e' || s[0] == 'E') {
+< 		s = s[1:]
+< 		if s[0] == '+' || s[0] == '-' {
+< 			s = s[1:]
+< 			if s == "" {
+< 				return false
+< 			}
+< 		}
+< 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+< 			s = s[1:]
+< 		}
+< 	}
+< 
+< 	// Make sure we are at the end.
+< 	return s == ""
+---
+> // An errorContext provides context for type errors during decoding.
+> type errorContext struct {
+> 	Struct     reflect.Type
+> 	FieldStack []string
+269,284c211,229
+< 	data         []byte
+< 	off          int // read offset in data
+< 	scan         scanner
+< 	nextscan     scanner  // for calls to nextValue
+< 	errorContext struct { // provides context for type errors
+< 		Struct string
+< 		Field  string
+< 	}
+< 	savedError error
+< 	useNumber  bool
+< }
+< 
+< // errPhase is used for errors that should not happen unless
+< // there is a bug in the JSON decoder or something is editing
+< // the data slice while the decoder executes.
+< var errPhase = errors.New("JSON decoder out of sync - data changing underfoot?")
+---
+> 	data                  []byte
+> 	off                   int // next read offset in data
+> 	opcode                int // last read result
+> 	scan                  scanner
+> 	errorContext          *errorContext
+> 	savedError            error
+> 	useNumber             bool
+> 	disallowUnknownFields bool
+> }
+> 
+> // readIndex returns the position of the last byte read.
+> func (d *decodeState) readIndex() int {
+> 	return d.off - 1
+> }
+> 
+> // phasePanicMsg is used as a panic message when we end up with something that
+> // shouldn't happen. It can indicate a bug in the JSON decoder, or that
+> // something is editing the data slice while the decoder executes.
+> const phasePanicMsg = "JSON decoder out of sync - data changing underfoot?"
+290,291c235,239
+< 	d.errorContext.Struct = ""
+< 	d.errorContext.Field = ""
+---
+> 	if d.errorContext != nil {
+> 		d.errorContext.Struct = nil
+> 		// Reuse the allocated space for the FieldStack slice.
+> 		d.errorContext.FieldStack = d.errorContext.FieldStack[:0]
+> 	}
+295,299d242
+< // error aborts the decoding by panicking with err.
+< func (d *decodeState) error(err error) {
+< 	panic(d.addErrorContext(err))
+< }
+< 
+310c253
+< 	if d.errorContext.Struct != "" || d.errorContext.Field != "" {
+---
+> 	if d.errorContext != nil && (d.errorContext.Struct != nil || len(d.errorContext.FieldStack) > 0) {
+313,315c256,257
+< 			err.Struct = d.errorContext.Struct
+< 			err.Field = d.errorContext.Field
+< 			return err
+---
+> 			err.Struct = d.errorContext.Struct.Name()
+> 			err.Field = strings.Join(d.errorContext.FieldStack, ".")
+321,327c263,274
+< // next cuts off and returns the next full JSON value in d.data[d.off:].
+< // The next value is known to be an object or array, not a literal.
+< func (d *decodeState) next() []byte {
+< 	c := d.data[d.off]
+< 	item, rest, err := nextValue(d.data[d.off:], &d.nextscan)
+< 	if err != nil {
+< 		d.error(err)
+---
+> // skip scans to the end of what was started.
+> func (d *decodeState) skip() {
+> 	s, data, i := &d.scan, d.data, d.off
+> 	depth := len(s.parseState)
+> 	for {
+> 		op := s.step(s, data[i])
+> 		i++
+> 		if len(s.parseState) < depth {
+> 			d.off = i
+> 			d.opcode = op
+> 			return
+> 		}
+329c276
+< 	d.off = len(d.data) - len(rest)
+---
+> }
+331,335c278,282
+< 	// Our scanner has seen the opening brace/bracket
+< 	// and thinks we're still in the middle of the object.
+< 	// invent a closing brace/bracket to get it out.
+< 	if c == '{' {
+< 		d.scan.step(&d.scan, '}')
+---
+> // scanNext processes the byte at d.data[d.off].
+> func (d *decodeState) scanNext() {
+> 	if d.off < len(d.data) {
+> 		d.opcode = d.scan.step(&d.scan, d.data[d.off])
+> 		d.off++
+337c284,285
+< 		d.scan.step(&d.scan, ']')
+---
+> 		d.opcode = d.scan.eof()
+> 		d.off = len(d.data) + 1 // mark processed EOF with len+1
+339,340d286
+< 
+< 	return item
+345,356c291,295
+< // It updates d.off and returns the new scan code.
+< func (d *decodeState) scanWhile(op int) int {
+< 	var newOp int
+< 	for {
+< 		if d.off >= len(d.data) {
+< 			newOp = d.scan.eof()
+< 			d.off = len(d.data) + 1 // mark processed EOF with len+1
+< 		} else {
+< 			c := d.data[d.off]
+< 			d.off++
+< 			newOp = d.scan.step(&d.scan, c)
+< 		}
+---
+> func (d *decodeState) scanWhile(op int) {
+> 	s, data, i := &d.scan, d.data, d.off
+> 	for i < len(data) {
+> 		newOp := s.step(s, data[i])
+> 		i++
+358c297,299
+< 			break
+---
+> 			d.opcode = newOp
+> 			d.off = i
+> 			return
+361c302,304
+< 	return newOp
+---
+> 
+> 	d.off = len(data) + 1 // mark processed EOF with len+1
+> 	d.opcode = d.scan.eof()
+364,370c307,327
+< // value decodes a JSON value from d.data[d.off:] into the value.
+< // it updates d.off to point past the decoded value.
+< func (d *decodeState) value(v reflect.Value) {
+< 	if !v.IsValid() {
+< 		_, rest, err := nextValue(d.data[d.off:], &d.nextscan)
+< 		if err != nil {
+< 			d.error(err)
+---
+> // rescanLiteral is similar to scanWhile(scanContinue), but it specialises the
+> // common case where we're decoding a literal. The decoder scans the input
+> // twice, once for syntax errors and to check the length of the value, and the
+> // second to perform the decoding.
+> //
+> // Only in the second step do we use decodeState to tokenize literals, so we
+> // know there aren't any syntax errors. We can take advantage of that knowledge,
+> // and scan a literal's bytes much more quickly.
+> func (d *decodeState) rescanLiteral() {
+> 	data, i := d.data, d.off
+> Switch:
+> 	switch data[i-1] {
+> 	case '"': // string
+> 		for ; i < len(data); i++ {
+> 			switch data[i] {
+> 			case '\\':
+> 				i++ // escaped char
+> 			case '"':
+> 				i++ // tokenize the closing quote too
+> 				break Switch
+> 			}
+372,391c329,336
+< 		d.off = len(d.data) - len(rest)
+< 
+< 		// d.scan thinks we're still at the beginning of the item.
+< 		// Feed in an empty string - the shortest, simplest value -
+< 		// so that it knows we got to the end of the value.
+< 		if d.scan.redo {
+< 			// rewind.
+< 			d.scan.redo = false
+< 			d.scan.step = stateBeginValue
+< 		}
+< 		d.scan.step(&d.scan, '"')
+< 		d.scan.step(&d.scan, '"')
+< 
+< 		n := len(d.scan.parseState)
+< 		if n > 0 && d.scan.parseState[n-1] == parseObjectKey {
+< 			// d.scan thinks we just read an object key; finish the object
+< 			d.scan.step(&d.scan, ':')
+< 			d.scan.step(&d.scan, '"')
+< 			d.scan.step(&d.scan, '"')
+< 			d.scan.step(&d.scan, '}')
+---
+> 	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '-': // number
+> 		for ; i < len(data); i++ {
+> 			switch data[i] {
+> 			case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
+> 				'.', 'e', 'E', '+', '-':
+> 			default:
+> 				break Switch
+> 			}
+393,394c338,343
+< 
+< 		return
+---
+> 	case 't': // true
+> 		i += len("rue")
+> 	case 'f': // false
+> 		i += len("alse")
+> 	case 'n': // null
+> 		i += len("ull")
+395a345,351
+> 	if i < len(data) {
+> 		d.opcode = stateEndValue(&d.scan, data[i])
+> 	} else {
+> 		d.opcode = scanEnd
+> 	}
+> 	d.off = i + 1
+> }
+397c353,357
+< 	switch op := d.scanWhile(scanSkipSpace); op {
+---
+> // value consumes a JSON value from d.data[d.off-1:], decoding into v, and
+> // reads the following byte ahead. If v is invalid, the value is discarded.
+> // The first byte of the value has been read already.
+> func (d *decodeState) value(v reflect.Value) error {
+> 	switch d.opcode {
+399c359
+< 		d.error(errPhase)
+---
+> 		panic(phasePanicMsg)
+402c362,369
+< 		d.array(v)
+---
+> 		if v.IsValid() {
+> 			if err := d.array(v); err != nil {
+> 				return err
+> 			}
+> 		} else {
+> 			d.skip()
+> 		}
+> 		d.scanNext()
+405c372,379
+< 		d.object(v)
+---
+> 		if v.IsValid() {
+> 			if err := d.object(v); err != nil {
+> 				return err
+> 			}
+> 		} else {
+> 			d.skip()
+> 		}
+> 		d.scanNext()
+408c382,390
+< 		d.literal(v)
+---
+> 		// All bytes inside literal return scanContinue op code.
+> 		start := d.readIndex()
+> 		d.rescanLiteral()
+> 
+> 		if v.IsValid() {
+> 			if err := d.literalStore(d.data[start:d.readIndex()], v, false); err != nil {
+> 				return err
+> 			}
+> 		}
+409a392
+> 	return nil
+419c402
+< 	switch op := d.scanWhile(scanSkipSpace); op {
+---
+> 	switch d.opcode {
+421c404
+< 		d.error(errPhase)
+---
+> 		panic(phasePanicMsg)
+423,427c406,408
+< 	case scanBeginArray:
+< 		d.array(reflect.Value{})
+< 
+< 	case scanBeginObject:
+< 		d.object(reflect.Value{})
+---
+> 	case scanBeginArray, scanBeginObject:
+> 		d.skip()
+> 		d.scanNext()
+430c411,412
+< 		switch v := d.literalInterface().(type) {
+---
+> 		v := d.literalInterface()
+> 		switch v.(type) {
+440,442c422,439
+< // if it encounters an Unmarshaler, indirect stops and returns that.
+< // if decodingNull is true, indirect stops at the last pointer so it can be set to nil.
+< func (d *decodeState) indirect(v reflect.Value, decodingNull bool) (Unmarshaler, encoding.TextUnmarshaler, reflect.Value) {
+---
+> // If it encounters an Unmarshaler, indirect stops and returns that.
+> // If decodingNull is true, indirect stops at the first settable pointer so it
+> // can be set to nil.
+> func indirect(v reflect.Value, decodingNull bool) (Unmarshaler, encoding.TextUnmarshaler, reflect.Value) {
+> 	// Issue #24153 indicates that it is generally not a guaranteed property
+> 	// that you may round-trip a reflect.Value by calling Value.Addr().Elem()
+> 	// and expect the value to still be settable for values derived from
+> 	// unexported embedded struct fields.
+> 	//
+> 	// The logic below effectively does this when it first addresses the value
+> 	// (to satisfy possible pointer methods) and continues to dereference
+> 	// subsequent pointers as necessary.
+> 	//
+> 	// After the first round-trip, we set v back to the original value to
+> 	// preserve the original RW flags contained in reflect.Value.
+> 	v0 := v
+> 	haveAddr := false
+> 
+446a444
+> 		haveAddr = true
+454a453
+> 				haveAddr = false
+464c463,471
+< 		if v.Elem().Kind() != reflect.Ptr && decodingNull && v.CanSet() {
+---
+> 		if decodingNull && v.CanSet() {
+> 			break
+> 		}
+> 
+> 		// Prevent infinite loop if v is an interface pointing to its own address:
+> 		//     var v interface{}
+> 		//     v = &v
+> 		if v.Elem().Kind() == reflect.Interface && v.Elem().Elem() == v {
+> 			v = v.Elem()
+470c477
+< 		if v.Type().NumMethod() > 0 {
+---
+> 		if v.Type().NumMethod() > 0 && v.CanInterface() {
+480c487,493
+< 		v = v.Elem()
+---
+> 
+> 		if haveAddr {
+> 			v = v0 // restore original value after round-trip Value.Addr().Elem()
+> 			haveAddr = false
+> 		} else {
+> 			v = v.Elem()
+> 		}
+485,487c498,500
+< // array consumes an array from d.data[d.off-1:], decoding into the value v.
+< // the first byte of the array ('[') has been read already.
+< func (d *decodeState) array(v reflect.Value) {
+---
+> // array consumes an array from d.data[d.off-1:], decoding into v.
+> // The first byte of the array ('[') has been read already.
+> func (d *decodeState) array(v reflect.Value) error {
+489c502
+< 	u, ut, pv := d.indirect(v, false)
+---
+> 	u, ut, pv := indirect(v, false)
+491,496c504,506
+< 		d.off--
+< 		err := u.UnmarshalJSON(d.next())
+< 		if err != nil {
+< 			d.error(err)
+< 		}
+< 		return
+---
+> 		start := d.readIndex()
+> 		d.skip()
+> 		return u.UnmarshalJSON(d.data[start:d.off])
+500,502c510,511
+< 		d.off--
+< 		d.next()
+< 		return
+---
+> 		d.skip()
+> 		return nil
+504d512
+< 
+511,513c519,522
+< 			// Decoding into nil interface?  Switch to non-reflect code.
+< 			v.Set(reflect.ValueOf(d.arrayInterface()))
+< 			return
+---
+> 			// Decoding into nil interface? Switch to non-reflect code.
+> 			ai := d.arrayInterface()
+> 			v.Set(reflect.ValueOf(ai))
+> 			return nil
+519,523c528,530
+< 		d.off--
+< 		d.next()
+< 		return
+< 	case reflect.Array:
+< 	case reflect.Slice:
+---
+> 		d.skip()
+> 		return nil
+> 	case reflect.Array, reflect.Slice:
+530,531c537,538
+< 		op := d.scanWhile(scanSkipSpace)
+< 		if op == scanEndArray {
+---
+> 		d.scanWhile(scanSkipSpace)
+> 		if d.opcode == scanEndArray {
+535,538d541
+< 		// Back up so d.value can have the byte we just read.
+< 		d.off--
+< 		d.scan.undo(op)
+< 
+558c561,563
+< 			d.value(v.Index(i))
+---
+> 			if err := d.value(v.Index(i)); err != nil {
+> 				return err
+> 			}
+561c566,568
+< 			d.value(reflect.Value{})
+---
+> 			if err := d.value(reflect.Value{}); err != nil {
+> 				return err
+> 			}
+566,567c573,576
+< 		op = d.scanWhile(scanSkipSpace)
+< 		if op == scanEndArray {
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+> 		}
+> 		if d.opcode == scanEndArray {
+570,571c579,580
+< 		if op != scanArrayValue {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanArrayValue {
+> 			panic(phasePanicMsg)
+588a598
+> 	return nil
+592c602
+< var textUnmarshalerType = reflect.TypeOf(new(encoding.TextUnmarshaler)).Elem()
+---
+> var textUnmarshalerType = reflect.TypeOf((*encoding.TextUnmarshaler)(nil)).Elem()
+594,596c604,606
+< // object consumes an object from d.data[d.off-1:], decoding into the value v.
+< // the first byte ('{') of the object has been read already.
+< func (d *decodeState) object(v reflect.Value) {
+---
+> // object consumes an object from d.data[d.off-1:], decoding into v.
+> // The first byte ('{') of the object has been read already.
+> func (d *decodeState) object(v reflect.Value) error {
+598c608
+< 	u, ut, pv := d.indirect(v, false)
+---
+> 	u, ut, pv := indirect(v, false)
+600,605c610,612
+< 		d.off--
+< 		err := u.UnmarshalJSON(d.next())
+< 		if err != nil {
+< 			d.error(err)
+< 		}
+< 		return
+---
+> 		start := d.readIndex()
+> 		d.skip()
+> 		return u.UnmarshalJSON(d.data[start:d.off])
+609,611c616,617
+< 		d.off--
+< 		d.next() // skip over { } in input
+< 		return
+---
+> 		d.skip()
+> 		return nil
+613a620
+> 	t := v.Type()
+615c622
+< 	// Decoding into nil interface?  Switch to non-reflect code.
+---
+> 	// Decoding into nil interface? Switch to non-reflect code.
+617,618c624,626
+< 		v.Set(reflect.ValueOf(d.objectInterface()))
+< 		return
+---
+> 		oi := d.objectInterface()
+> 		v.Set(reflect.ValueOf(oi))
+> 		return nil
+620a629,630
+> 	var fields structFields
+> 
+629d638
+< 		t := v.Type()
+636,639c645,647
+< 				d.saveError(&UnmarshalTypeError{Value: "object", Type: v.Type(), Offset: int64(d.off)})
+< 				d.off--
+< 				d.next() // skip over { } in input
+< 				return
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "object", Type: t, Offset: int64(d.off)})
+> 				d.skip()
+> 				return nil
+645a654
+> 		fields = cachedTypeFields(t)
+648,651c657,659
+< 		d.saveError(&UnmarshalTypeError{Value: "object", Type: v.Type(), Offset: int64(d.off)})
+< 		d.off--
+< 		d.next() // skip over { } in input
+< 		return
+---
+> 		d.saveError(&UnmarshalTypeError{Value: "object", Type: t, Offset: int64(d.off)})
+> 		d.skip()
+> 		return nil
+654a663,666
+> 	var origErrorContext errorContext
+> 	if d.errorContext != nil {
+> 		origErrorContext = *d.errorContext
+> 	}
+658,659c670,671
+< 		op := d.scanWhile(scanSkipSpace)
+< 		if op == scanEndObject {
+---
+> 		d.scanWhile(scanSkipSpace)
+> 		if d.opcode == scanEndObject {
+663,664c675,676
+< 		if op != scanBeginLiteral {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanBeginLiteral {
+> 			panic(phasePanicMsg)
+668,670c680,682
+< 		start := d.off - 1
+< 		op = d.scanWhile(scanContinue)
+< 		item := d.data[start : d.off-1]
+---
+> 		start := d.readIndex()
+> 		d.rescanLiteral()
+> 		item := d.data[start:d.readIndex()]
+673c685
+< 			d.error(errPhase)
+---
+> 			panic(phasePanicMsg)
+681c693
+< 			elemType := v.Type().Elem()
+---
+> 			elemType := t.Elem()
+690,698c702,713
+< 			fields := cachedTypeFields(v.Type())
+< 			for i := range fields {
+< 				ff := &fields[i]
+< 				if bytes.Equal(ff.nameBytes, key) {
+< 					f = ff
+< 					break
+< 				}
+< 				if f == nil && ff.equalFold(ff.nameBytes, key) {
+< 					f = ff
+---
+> 			if i, ok := fields.nameIndex[string(key)]; ok {
+> 				// Found an exact name match.
+> 				f = &fields.list[i]
+> 			} else {
+> 				// Fall back to the expensive case-insensitive
+> 				// linear search.
+> 				for i := range fields.list {
+> 					ff := &fields.list[i]
+> 					if ff.equalFold(ff.nameBytes, key) {
+> 						f = ff
+> 						break
+> 					}
+706a722,734
+> 							// If a struct embeds a pointer to an unexported type,
+> 							// it is not possible to set a newly allocated value
+> 							// since the field is unexported.
+> 							//
+> 							// See https://golang.org/issue/21357
+> 							if !subv.CanSet() {
+> 								d.saveError(fmt.Errorf("json: cannot set embedded pointer to unexported struct: %v", subv.Type().Elem()))
+> 								// Invalidate subv to ensure d.value(subv) skips over
+> 								// the JSON value without assigning it to subv.
+> 								subv = reflect.Value{}
+> 								destring = false
+> 								break
+> 							}
+713,714c741,747
+< 				d.errorContext.Field = f.name
+< 				d.errorContext.Struct = v.Type().Name()
+---
+> 				if d.errorContext == nil {
+> 					d.errorContext = new(errorContext)
+> 				}
+> 				d.errorContext.FieldStack = append(d.errorContext.FieldStack, f.name)
+> 				d.errorContext.Struct = t
+> 			} else if d.disallowUnknownFields {
+> 				d.saveError(fmt.Errorf("json: unknown field %q", key))
+719,720c752,753
+< 		if op == scanSkipSpace {
+< 			op = d.scanWhile(scanSkipSpace)
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+722,723c755,756
+< 		if op != scanObjectKey {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanObjectKey {
+> 			panic(phasePanicMsg)
+724a758
+> 		d.scanWhile(scanSkipSpace)
+729c763,765
+< 				d.literalStore(nullLiteral, subv, false)
+---
+> 				if err := d.literalStore(nullLiteral, subv, false); err != nil {
+> 					return err
+> 				}
+731c767,769
+< 				d.literalStore([]byte(qv), subv, true)
+---
+> 				if err := d.literalStore([]byte(qv), subv, true); err != nil {
+> 					return err
+> 				}
+736c774,776
+< 			d.value(subv)
+---
+> 			if err := d.value(subv); err != nil {
+> 				return err
+> 			}
+742c782
+< 			kt := v.Type().Key()
+---
+> 			kt := t.Key()
+745,746d784
+< 			case kt.Kind() == reflect.String:
+< 				kv = reflect.ValueOf(key).Convert(kt)
+748,749c786,789
+< 				kv = reflect.New(v.Type().Key())
+< 				d.literalStore(item, kv, true)
+---
+> 				kv = reflect.New(kt)
+> 				if err := d.literalStore(item, kv, true); err != nil {
+> 					return err
+> 				}
+750a791,792
+> 			case kt.Kind() == reflect.String:
+> 				kv = reflect.ValueOf(key).Convert(kt)
+758c800
+< 						return
+---
+> 						break
+766c808
+< 						return
+---
+> 						break
+773c815,817
+< 			v.SetMapIndex(kv, subv)
+---
+> 			if kv.IsValid() {
+> 				v.SetMapIndex(kv, subv)
+> 			}
+777,778c821,831
+< 		op = d.scanWhile(scanSkipSpace)
+< 		if op == scanEndObject {
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+> 		}
+> 		if d.errorContext != nil {
+> 			// Reset errorContext to its original state.
+> 			// Keep the same underlying array for FieldStack, to reuse the
+> 			// space and avoid unnecessary allocs.
+> 			d.errorContext.FieldStack = d.errorContext.FieldStack[:len(origErrorContext.FieldStack)]
+> 			d.errorContext.Struct = origErrorContext.Struct
+> 		}
+> 		if d.opcode == scanEndObject {
+781,782c834,835
+< 		if op != scanObjectValue {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanObjectValue {
+> 			panic(phasePanicMsg)
+784,786d836
+< 
+< 		d.errorContext.Struct = ""
+< 		d.errorContext.Field = ""
+788,802c838
+< }
+< 
+< // literal consumes a literal from d.data[d.off-1:], decoding into the value v.
+< // The first byte of the literal has been read already
+< // (that's how the caller knows it's a literal).
+< func (d *decodeState) literal(v reflect.Value) {
+< 	// All bytes inside literal return scanContinue op code.
+< 	start := d.off - 1
+< 	op := d.scanWhile(scanContinue)
+< 
+< 	// Scan read one byte too far; back up.
+< 	d.off--
+< 	d.scan.undo(op)
+< 
+< 	d.literalStore(d.data[start:d.off], v, false)
+---
+> 	return nil
+825c861
+< func (d *decodeState) literalStore(item []byte, v reflect.Value, fromQuoted bool) {
+---
+> func (d *decodeState) literalStore(item []byte, v reflect.Value, fromQuoted bool) error {
+830c866
+< 		return
+---
+> 		return nil
+833c869
+< 	u, ut, pv := d.indirect(v, isNull)
+---
+> 	u, ut, pv := indirect(v, isNull)
+835,839c871
+< 		err := u.UnmarshalJSON(item)
+< 		if err != nil {
+< 			d.error(err)
+< 		}
+< 		return
+---
+> 		return u.UnmarshalJSON(item)
+845,855c877
+< 			} else {
+< 				var val string
+< 				switch item[0] {
+< 				case 'n':
+< 					val = "null"
+< 				case 't', 'f':
+< 					val = "bool"
+< 				default:
+< 					val = "number"
+< 				}
+< 				d.saveError(&UnmarshalTypeError{Value: val, Type: v.Type(), Offset: int64(d.off)})
+---
+> 				return nil
+857c879,887
+< 			return
+---
+> 			val := "number"
+> 			switch item[0] {
+> 			case 'n':
+> 				val = "null"
+> 			case 't', 'f':
+> 				val = "bool"
+> 			}
+> 			d.saveError(&UnmarshalTypeError{Value: val, Type: v.Type(), Offset: int64(d.readIndex())})
+> 			return nil
+862,864c892
+< 				d.error(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type()))
+< 			} else {
+< 				d.error(errPhase)
+---
+> 				return fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type())
+865a894
+> 			panic(phasePanicMsg)
+867,871c896
+< 		err := ut.UnmarshalText(s)
+< 		if err != nil {
+< 			d.error(err)
+< 		}
+< 		return
+---
+> 		return ut.UnmarshalText(s)
+902c927
+< 				d.saveError(&UnmarshalTypeError{Value: "bool", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "bool", Type: v.Type(), Offset: int64(d.readIndex())})
+910c935
+< 				d.saveError(&UnmarshalTypeError{Value: "bool", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "bool", Type: v.Type(), Offset: int64(d.readIndex())})
+918,920c943
+< 				d.error(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type()))
+< 			} else {
+< 				d.error(errPhase)
+---
+> 				return fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type())
+921a945
+> 			panic(phasePanicMsg)
+925c949
+< 			d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.off)})
+---
+> 			d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.readIndex())})
+928c952
+< 				d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.readIndex())})
+938a963,965
+> 			if v.Type() == numberType && !isValidNumber(string(s)) {
+> 				return fmt.Errorf("json: invalid number literal, trying to unmarshal %q into Number", item)
+> 			}
+944c971
+< 				d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "string", Type: v.Type(), Offset: int64(d.readIndex())})
+951,953c978
+< 				d.error(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type()))
+< 			} else {
+< 				d.error(errPhase)
+---
+> 				return fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type())
+954a980
+> 			panic(phasePanicMsg)
+959a986,987
+> 				// s must be a valid number, because it's
+> 				// already been tokenized.
+961,963d988
+< 				if !isValidNumber(s) {
+< 					d.error(fmt.Errorf("json: invalid number literal, trying to unmarshal %q into Number", item))
+< 				}
+967,969c992
+< 				d.error(fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type()))
+< 			} else {
+< 				d.error(&UnmarshalTypeError{Value: "number", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				return fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into %v", item, v.Type())
+970a994
+> 			d.saveError(&UnmarshalTypeError{Value: "number", Type: v.Type(), Offset: int64(d.readIndex())})
+978c1002
+< 				d.saveError(&UnmarshalTypeError{Value: "number", Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "number", Type: v.Type(), Offset: int64(d.readIndex())})
+986c1010
+< 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.readIndex())})
+994c1018
+< 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.readIndex())})
+1002c1026
+< 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.off)})
+---
+> 				d.saveError(&UnmarshalTypeError{Value: "number " + s, Type: v.Type(), Offset: int64(d.readIndex())})
+1007a1032
+> 	return nil
+1015,1016c1040,1041
+< func (d *decodeState) valueInterface() interface{} {
+< 	switch d.scanWhile(scanSkipSpace) {
+---
+> func (d *decodeState) valueInterface() (val interface{}) {
+> 	switch d.opcode {
+1018,1019c1043
+< 		d.error(errPhase)
+< 		panic("unreachable")
+---
+> 		panic(phasePanicMsg)
+1021c1045,1046
+< 		return d.arrayInterface()
+---
+> 		val = d.arrayInterface()
+> 		d.scanNext()
+1023c1048,1049
+< 		return d.objectInterface()
+---
+> 		val = d.objectInterface()
+> 		d.scanNext()
+1025c1051
+< 		return d.literalInterface()
+---
+> 		val = d.literalInterface()
+1026a1053
+> 	return
+1034,1035c1061,1062
+< 		op := d.scanWhile(scanSkipSpace)
+< 		if op == scanEndArray {
+---
+> 		d.scanWhile(scanSkipSpace)
+> 		if d.opcode == scanEndArray {
+1039,1042d1065
+< 		// Back up so d.value can have the byte we just read.
+< 		d.off--
+< 		d.scan.undo(op)
+< 
+1046,1047c1069,1072
+< 		op = d.scanWhile(scanSkipSpace)
+< 		if op == scanEndArray {
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+> 		}
+> 		if d.opcode == scanEndArray {
+1050,1051c1075,1076
+< 		if op != scanArrayValue {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanArrayValue {
+> 			panic(phasePanicMsg)
+1062,1063c1087,1088
+< 		op := d.scanWhile(scanSkipSpace)
+< 		if op == scanEndObject {
+---
+> 		d.scanWhile(scanSkipSpace)
+> 		if d.opcode == scanEndObject {
+1067,1068c1092,1093
+< 		if op != scanBeginLiteral {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanBeginLiteral {
+> 			panic(phasePanicMsg)
+1072,1074c1097,1099
+< 		start := d.off - 1
+< 		op = d.scanWhile(scanContinue)
+< 		item := d.data[start : d.off-1]
+---
+> 		start := d.readIndex()
+> 		d.rescanLiteral()
+> 		item := d.data[start:d.readIndex()]
+1077c1102
+< 			d.error(errPhase)
+---
+> 			panic(phasePanicMsg)
+1081,1082c1106,1107
+< 		if op == scanSkipSpace {
+< 			op = d.scanWhile(scanSkipSpace)
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+1084,1085c1109,1110
+< 		if op != scanObjectKey {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanObjectKey {
+> 			panic(phasePanicMsg)
+1086a1112
+> 		d.scanWhile(scanSkipSpace)
+1092,1093c1118,1121
+< 		op = d.scanWhile(scanSkipSpace)
+< 		if op == scanEndObject {
+---
+> 		if d.opcode == scanSkipSpace {
+> 			d.scanWhile(scanSkipSpace)
+> 		}
+> 		if d.opcode == scanEndObject {
+1096,1097c1124,1125
+< 		if op != scanObjectValue {
+< 			d.error(errPhase)
+---
+> 		if d.opcode != scanObjectValue {
+> 			panic(phasePanicMsg)
+1103c1131,1133
+< // literalInterface is like literal but returns an interface value.
+---
+> // literalInterface consumes and returns a literal from d.data[d.off-1:] and
+> // it reads the following byte ahead. The first byte of the literal has been
+> // read already (that's how the caller knows it's a literal).
+1106,1107c1136,1137
+< 	start := d.off - 1
+< 	op := d.scanWhile(scanContinue)
+---
+> 	start := d.readIndex()
+> 	d.rescanLiteral()
+1109,1112c1139
+< 	// Scan read one byte too far; back up.
+< 	d.off--
+< 	d.scan.undo(op)
+< 	item := d.data[start:d.off]
+---
+> 	item := d.data[start:d.readIndex()]
+1124c1151
+< 			d.error(errPhase)
+---
+> 			panic(phasePanicMsg)
+1130c1157
+< 			d.error(errPhase)
+---
+> 			panic(phasePanicMsg)
+1146,1148c1173,1185
+< 	r, err := strconv.ParseUint(string(s[2:6]), 16, 64)
+< 	if err != nil {
+< 		return -1
+---
+> 	var r rune
+> 	for _, c := range s[2:6] {
+> 		switch {
+> 		case '0' <= c && c <= '9':
+> 			c = c - '0'
+> 		case 'a' <= c && c <= 'f':
+> 			c = c - 'a' + 10
+> 		case 'A' <= c && c <= 'F':
+> 			c = c - 'A' + 10
+> 		default:
+> 			return -1
+> 		}
+> 		r = r*16 + rune(c)
+1150c1187
+< 	return rune(r)
+---
+> 	return r
+1193c1230
+< 		// Out of room?  Can only happen if s is full of
+---
+> 		// Out of room? Can only happen if s is full of
+43a44,62
+> type W struct {
+> 	S SS
+> }
+> 
+> type P struct {
+> 	PP PP
+> }
+> 
+> type PP struct {
+> 	T  T
+> 	Ts []T
+> }
+> 
+> type SS string
+> 
+> func (*SS) UnmarshalJSON(data []byte) error {
+> 	return &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(SS(""))}
+> }
+> 
+91c110
+< 	pos := bytes.Index(b, []byte(":"))
+---
+> 	pos := bytes.IndexByte(b, ':')
+129,130d147
+< 	um0, um1 unmarshaler // target2 of unmarshaling
+< 	ump      = &um1
+133d149
+< 	umslicep = new([]unmarshaler)
+136,142c152,154
+< 	um0T, um1T   unmarshalerText // target2 of unmarshaling
+< 	umpType      = &um1T
+< 	umtrueXY     = unmarshalerText{"x", "y"}
+< 	umsliceXY    = []unmarshalerText{{"x", "y"}}
+< 	umslicepType = new([]unmarshalerText)
+< 	umstructType = new(ustructText)
+< 	umstructXY   = ustructText{unmarshalerText{"x", "y"}}
+---
+> 	umtrueXY   = unmarshalerText{"x", "y"}
+> 	umsliceXY  = []unmarshalerText{{"x", "y"}}
+> 	umstructXY = ustructText{unmarshalerText{"x", "y"}}
+144,145c156
+< 	ummapType = map[unmarshalerText]bool{}
+< 	ummapXY   = map[unmarshalerText]bool{unmarshalerText{"x", "y"}: true}
+---
+> 	ummapXY = map[unmarshalerText]bool{{"x", "y"}: true}
+259,260c270,272
+< func sliceAddr(x []int) *[]int                 { return &x }
+< func mapAddr(x map[string]int) *map[string]int { return &x }
+---
+> type unexportedWithMethods struct{}
+> 
+> func (unexportedWithMethods) F() {}
+373a386,389
+> type mapStringToStringData struct {
+> 	Data map[string]string `json:"data"`
+> }
+> 
+375,380c391,397
+< 	in        string
+< 	ptr       interface{}
+< 	out       interface{}
+< 	err       error
+< 	useNumber bool
+< 	golden    bool
+---
+> 	in                    string
+> 	ptr                   interface{} // new(type)
+> 	out                   interface{}
+> 	err                   error
+> 	useNumber             bool
+> 	golden                bool
+> 	disallowUnknownFields bool
+386a404,408
+> type DoublePtr struct {
+> 	I **int
+> 	J **int
+> }
+> 
+402a425
+> 	{in: `{"X": 23}`, ptr: new(T), out: T{}, err: &UnmarshalTypeError{"number", reflect.TypeOf(""), 8, "T", "X"}}, {in: `{"x": 1}`, ptr: new(tx), out: tx{}},
+403a427,428
+> 	{in: `{"x": 1}`, ptr: new(tx), err: fmt.Errorf("json: unknown field \"x\""), disallowUnknownFields: true},
+> 	{in: `{"S": 23}`, ptr: new(W), out: W{}, err: &UnmarshalTypeError{"number", reflect.TypeOf(SS("")), 0, "W", "S"}},
+417a443
+> 	{in: `{"Y": 1, "Z": 2}`, ptr: new(T), err: fmt.Errorf("json: unknown field \"Z\""), disallowUnknownFields: true},
+419a446
+> 	{in: `{"alpha": "abc", "alphabet": "xyz"}`, ptr: new(U), err: fmt.Errorf("json: unknown field \"alphabet\""), disallowUnknownFields: true},
+421a449
+> 	{in: `{"alphabet": "xyz"}`, ptr: new(U), err: fmt.Errorf("json: unknown field \"alphabet\""), disallowUnknownFields: true},
+426a455,456
+> 	{in: `[2, 3`, err: &SyntaxError{msg: "unexpected end of JSON input", Offset: 5}},
+> 	{in: `{"F3": -}`, ptr: new(V), out: V{F3: Number("-")}, err: &SyntaxError{msg: "invalid character '}' in numeric literal", Offset: 9}},
+441a472
+> 	{in: `[1, 2, 3]`, ptr: new(MustNotUnmarshalJSON), err: errors.New("MustNotUnmarshalJSON was used")},
+460,464c491,495
+< 	{in: `{"T":false}`, ptr: &um0, out: umtrue}, // use "false" so test will fail if custom unmarshaler is not called
+< 	{in: `{"T":false}`, ptr: &ump, out: &umtrue},
+< 	{in: `[{"T":false}]`, ptr: &umslice, out: umslice},
+< 	{in: `[{"T":false}]`, ptr: &umslicep, out: &umslice},
+< 	{in: `{"M":{"T":"x:y"}}`, ptr: &umstruct, out: umstruct},
+---
+> 	{in: `{"T":false}`, ptr: new(unmarshaler), out: umtrue}, // use "false" so test will fail if custom unmarshaler is not called
+> 	{in: `{"T":false}`, ptr: new(*unmarshaler), out: &umtrue},
+> 	{in: `[{"T":false}]`, ptr: new([]unmarshaler), out: umslice},
+> 	{in: `[{"T":false}]`, ptr: new(*[]unmarshaler), out: &umslice},
+> 	{in: `{"M":{"T":"x:y"}}`, ptr: new(ustruct), out: umstruct},
+467,471c498,502
+< 	{in: `"x:y"`, ptr: &um0T, out: umtrueXY},
+< 	{in: `"x:y"`, ptr: &umpType, out: &umtrueXY},
+< 	{in: `["x:y"]`, ptr: &umsliceXY, out: umsliceXY},
+< 	{in: `["x:y"]`, ptr: &umslicepType, out: &umsliceXY},
+< 	{in: `{"M":"x:y"}`, ptr: umstructType, out: umstructXY},
+---
+> 	{in: `"x:y"`, ptr: new(unmarshalerText), out: umtrueXY},
+> 	{in: `"x:y"`, ptr: new(*unmarshalerText), out: &umtrueXY},
+> 	{in: `["x:y"]`, ptr: new([]unmarshalerText), out: umsliceXY},
+> 	{in: `["x:y"]`, ptr: new(*[]unmarshalerText), out: &umsliceXY},
+> 	{in: `{"M":"x:y"}`, ptr: new(ustructText), out: umstructXY},
+533a565,574
+> 	{
+> 		in:  `{"F":{"a":2,"3":4}}`,
+> 		ptr: new(map[string]map[int]int),
+> 		err: &UnmarshalTypeError{Value: "number a", Type: reflect.TypeOf(int(0)), Offset: 7},
+> 	},
+> 	{
+> 		in:  `{"F":{"a":2,"3":4}}`,
+> 		ptr: new(map[string]map[uint]int),
+> 		err: &UnmarshalTypeError{Value: "number a", Type: reflect.TypeOf(uint(0)), Offset: 7},
+> 	},
+536c577
+< 	{in: `{"x:y":true}`, ptr: &ummapType, out: ummapXY},
+---
+> 	{in: `{"x:y":true}`, ptr: new(map[unmarshalerText]bool), out: ummapXY},
+538,544c579
+< 	{in: `{"x:y":false,"x:y":true}`, ptr: &ummapType, out: ummapXY},
+< 
+< 	// Overwriting of data.
+< 	// This is different from package xml, but it's what we've always done.
+< 	// Now documented and tested.
+< 	{in: `[2]`, ptr: sliceAddr([]int{1}), out: []int{2}},
+< 	{in: `{"key": 2}`, ptr: mapAddr(map[string]int{"old": 0, "key": 1}), out: map[string]int{"key": 2}},
+---
+> 	{in: `{"x:y":false,"x:y":true}`, ptr: new(map[unmarshalerText]bool), out: ummapXY},
+612a648,653
+> 		in:                    `{"X": 1,"Y":2}`,
+> 		ptr:                   new(S5),
+> 		err:                   fmt.Errorf("json: unknown field \"X\""),
+> 		disallowUnknownFields: true,
+> 	},
+> 	{
+616a658,668
+> 	{
+> 		in:                    `{"X": 1,"Y":2}`,
+> 		ptr:                   new(S10),
+> 		err:                   fmt.Errorf("json: unknown field \"X\""),
+> 		disallowUnknownFields: true,
+> 	},
+> 	{
+> 		in:  `{"I": 0, "I": null, "J": null}`,
+> 		ptr: new(DoublePtr),
+> 		out: DoublePtr{I: nil, J: nil},
+> 	},
+658c710
+< 		ptr: &map[time.Time]string{},
+---
+> 		ptr: new(map[time.Time]string),
+665c717
+< 		ptr: &map[Point]string{},
+---
+> 		ptr: new(map[Point]string),
+670c722
+< 		ptr: &map[unmarshaler]string{},
+---
+> 		ptr: new(map[unmarshaler]string),
+770c822
+< 			Field:  "F2",
+---
+> 			Field:  "V.F2",
+781c833
+< 			Field:  "F2",
+---
+> 			Field:  "V.F2",
+795a848,982
+> 	{in: `{"B": [2, 3]}`, ptr: new(B), err: errors.New(`json: invalid use of ,string struct tag, trying to unmarshal unquoted value into bool`)},
+> 
+> 	// additional tests for disallowUnknownFields
+> 	{
+> 		in: `{
+> 			"Level0": 1,
+> 			"Level1b": 2,
+> 			"Level1c": 3,
+> 			"x": 4,
+> 			"Level1a": 5,
+> 			"LEVEL1B": 6,
+> 			"e": {
+> 				"Level1a": 8,
+> 				"Level1b": 9,
+> 				"Level1c": 10,
+> 				"Level1d": 11,
+> 				"x": 12
+> 			},
+> 			"Loop1": 13,
+> 			"Loop2": 14,
+> 			"X": 15,
+> 			"Y": 16,
+> 			"Z": 17,
+> 			"Q": 18,
+> 			"extra": true
+> 		}`,
+> 		ptr:                   new(Top),
+> 		err:                   fmt.Errorf("json: unknown field \"extra\""),
+> 		disallowUnknownFields: true,
+> 	},
+> 	{
+> 		in: `{
+> 			"Level0": 1,
+> 			"Level1b": 2,
+> 			"Level1c": 3,
+> 			"x": 4,
+> 			"Level1a": 5,
+> 			"LEVEL1B": 6,
+> 			"e": {
+> 				"Level1a": 8,
+> 				"Level1b": 9,
+> 				"Level1c": 10,
+> 				"Level1d": 11,
+> 				"x": 12,
+> 				"extra": null
+> 			},
+> 			"Loop1": 13,
+> 			"Loop2": 14,
+> 			"X": 15,
+> 			"Y": 16,
+> 			"Z": 17,
+> 			"Q": 18
+> 		}`,
+> 		ptr:                   new(Top),
+> 		err:                   fmt.Errorf("json: unknown field \"extra\""),
+> 		disallowUnknownFields: true,
+> 	},
+> 	// issue 26444
+> 	// UnmarshalTypeError without field & struct values
+> 	{
+> 		in:  `{"data":{"test1": "bob", "test2": 123}}`,
+> 		ptr: new(mapStringToStringData),
+> 		err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(""), Offset: 37, Struct: "mapStringToStringData", Field: "data"},
+> 	},
+> 	{
+> 		in:  `{"data":{"test1": 123, "test2": "bob"}}`,
+> 		ptr: new(mapStringToStringData),
+> 		err: &UnmarshalTypeError{Value: "number", Type: reflect.TypeOf(""), Offset: 21, Struct: "mapStringToStringData", Field: "data"},
+> 	},
+> 
+> 	// trying to decode JSON arrays or objects via TextUnmarshaler
+> 	{
+> 		in:  `[1, 2, 3]`,
+> 		ptr: new(MustNotUnmarshalText),
+> 		err: &UnmarshalTypeError{Value: "array", Type: reflect.TypeOf(&MustNotUnmarshalText{}), Offset: 1},
+> 	},
+> 	{
+> 		in:  `{"foo": "bar"}`,
+> 		ptr: new(MustNotUnmarshalText),
+> 		err: &UnmarshalTypeError{Value: "object", Type: reflect.TypeOf(&MustNotUnmarshalText{}), Offset: 1},
+> 	},
+> 	// #22369
+> 	{
+> 		in:  `{"PP": {"T": {"Y": "bad-type"}}}`,
+> 		ptr: new(P),
+> 		err: &UnmarshalTypeError{
+> 			Value:  "string",
+> 			Struct: "T",
+> 			Field:  "PP.T.Y",
+> 			Type:   reflect.TypeOf(int(0)),
+> 			Offset: 29,
+> 		},
+> 	},
+> 	{
+> 		in:  `{"Ts": [{"Y": 1}, {"Y": 2}, {"Y": "bad-type"}]}`,
+> 		ptr: new(PP),
+> 		err: &UnmarshalTypeError{
+> 			Value:  "string",
+> 			Struct: "T",
+> 			Field:  "Ts.Y",
+> 			Type:   reflect.TypeOf(int(0)),
+> 			Offset: 29,
+> 		},
+> 	},
+> 	// #14702
+> 	{
+> 		in:  `invalid`,
+> 		ptr: new(Number),
+> 		err: &SyntaxError{
+> 			msg:    "invalid character 'i' looking for beginning of value",
+> 			Offset: 1,
+> 		},
+> 	},
+> 	{
+> 		in:  `"invalid"`,
+> 		ptr: new(Number),
+> 		err: fmt.Errorf("json: invalid number literal, trying to unmarshal %q into Number", `"invalid"`),
+> 	},
+> 	{
+> 		in:  `{"A":"invalid"}`,
+> 		ptr: new(struct{ A Number }),
+> 		err: fmt.Errorf("json: invalid number literal, trying to unmarshal %q into Number", `"invalid"`),
+> 	},
+> 	{
+> 		in: `{"A":"invalid"}`,
+> 		ptr: new(struct {
+> 			A Number `json:",string"`
+> 		}),
+> 		err: fmt.Errorf("json: invalid use of ,string struct tag, trying to unmarshal %q into json.Number", `invalid`),
+> 	},
+> 	{
+> 		in:  `{"A":"invalid"}`,
+> 		ptr: new(map[string]Number),
+> 		err: fmt.Errorf("json: invalid number literal, trying to unmarshal %q into Number", `"invalid"`),
+> 	},
+893a1081,1090
+> func equalError(a, b error) bool {
+> 	if a == nil {
+> 		return b == nil
+> 	}
+> 	if b == nil {
+> 		return a == nil
+> 	}
+> 	return a.Error() == b.Error()
+> }
+> 
+899c1096
+< 			if !reflect.DeepEqual(err, tt.err) {
+---
+> 			if !equalError(err, tt.err) {
+907a1105,1111
+> 		typ := reflect.TypeOf(tt.ptr)
+> 		if typ.Kind() != reflect.Ptr {
+> 			t.Errorf("#%d: unmarshalTest.ptr %T is not a pointer type", i, tt.ptr)
+> 			continue
+> 		}
+> 		typ = typ.Elem()
+> 
+909c1113,1125
+< 		v := reflect.New(reflect.TypeOf(tt.ptr).Elem())
+---
+> 		v := reflect.New(typ)
+> 
+> 		if !reflect.DeepEqual(tt.ptr, v.Interface()) {
+> 			// There's no reason for ptr to point to non-zero data,
+> 			// as we decode into new(right-type), so the data is
+> 			// discarded.
+> 			// This can easily mean tests that silently don't test
+> 			// what they should. To test decoding into existing
+> 			// data, see TestPrefilled.
+> 			t.Errorf("#%d: unmarshalTest.ptr %#v is not a pointer to a zero value", i, tt.ptr)
+> 			continue
+> 		}
+> 
+914c1130,1133
+< 		if err := dec.Decode(v.Interface()); !reflect.DeepEqual(err, tt.err) {
+---
+> 		if tt.disallowUnknownFields {
+> 			dec.DisallowUnknownFields()
+> 		}
+> 		if err := dec.Decode(v.Interface()); !equalError(err, tt.err) {
+1077a1297,1298
+> 	{`{"result":"\""}`, `json: invalid use of ,string struct tag, trying to unmarshal "\"" into string`},
+> 	{`{"result":"\"foo"}`, `json: invalid use of ,string struct tag, trying to unmarshal "\"foo" into string`},
+1120c1341,1342
+< 	IntStr int64 `json:",string"`
+---
+> 	IntStr     int64   `json:",string"`
+> 	UintptrStr uintptr `json:",string"`
+1174,1191c1396,1414
+< 	Bool:    true,
+< 	Int:     2,
+< 	Int8:    3,
+< 	Int16:   4,
+< 	Int32:   5,
+< 	Int64:   6,
+< 	Uint:    7,
+< 	Uint8:   8,
+< 	Uint16:  9,
+< 	Uint32:  10,
+< 	Uint64:  11,
+< 	Uintptr: 12,
+< 	Float32: 14.1,
+< 	Float64: 15.1,
+< 	Foo:     "foo",
+< 	Foo2:    "foo2",
+< 	IntStr:  42,
+< 	String:  "16",
+---
+> 	Bool:       true,
+> 	Int:        2,
+> 	Int8:       3,
+> 	Int16:      4,
+> 	Int32:      5,
+> 	Int64:      6,
+> 	Uint:       7,
+> 	Uint8:      8,
+> 	Uint16:     9,
+> 	Uint32:     10,
+> 	Uint64:     11,
+> 	Uintptr:    12,
+> 	Float32:    14.1,
+> 	Float64:    15.1,
+> 	Foo:        "foo",
+> 	Foo2:       "foo2",
+> 	IntStr:     42,
+> 	UintptrStr: 44,
+> 	String:     "16",
+1252a1476
+> 	"UintptrStr": "44",
+1344a1569
+> 	"UintptrStr": "0",
+1563,1597d1787
+< type NullTestStrings struct {
+< 	Bool      bool              `json:",string"`
+< 	Int       int               `json:",string"`
+< 	Int8      int8              `json:",string"`
+< 	Int16     int16             `json:",string"`
+< 	Int32     int32             `json:",string"`
+< 	Int64     int64             `json:",string"`
+< 	Uint      uint              `json:",string"`
+< 	Uint8     uint8             `json:",string"`
+< 	Uint16    uint16            `json:",string"`
+< 	Uint32    uint32            `json:",string"`
+< 	Uint64    uint64            `json:",string"`
+< 	Float32   float32           `json:",string"`
+< 	Float64   float64           `json:",string"`
+< 	String    string            `json:",string"`
+< 	PBool     *bool             `json:",string"`
+< 	Map       map[string]string `json:",string"`
+< 	Slice     []string          `json:",string"`
+< 	Interface interface{}       `json:",string"`
+< 
+< 	PRaw    *RawMessage           `json:",string"`
+< 	PTime   *time.Time            `json:",string"`
+< 	PBigInt *big.Int              `json:",string"`
+< 	PText   *MustNotUnmarshalText `json:",string"`
+< 	PBuffer *bytes.Buffer         `json:",string"`
+< 	PStruct *struct{}             `json:",string"`
+< 
+< 	Raw    RawMessage           `json:",string"`
+< 	Time   time.Time            `json:",string"`
+< 	BigInt big.Int              `json:",string"`
+< 	Text   MustNotUnmarshalText `json:",string"`
+< 	Buffer bytes.Buffer         `json:",string"`
+< 	Struct struct{}             `json:",string"`
+< }
+< 
+1849a2040,2041
+> 
+> 	s []int `json:"-"`
+1853c2045
+< 	input := `{"Name": "Bob", "m": {"x": 123}, "m2": {"y": 456}, "abcd": {"z": 789}}`
+---
+> 	input := `{"Name": "Bob", "m": {"x": 123}, "m2": {"y": 456}, "abcd": {"z": 789}, "s": [2, 3]}`
+1906,1907c2098,2100
+< // Test semantics of pre-filled struct fields and pre-filled map fields.
+< // Issue 4900.
+---
+> // Test semantics of pre-filled data, such as struct fields, map elements,
+> // slices, and arrays.
+> // Issues 4900 and 8837, among others.
+1909,1910d2101
+< 	ptrToMap := func(m map[string]interface{}) *map[string]interface{} { return &m }
+< 
+1924,1925c2115,2136
+< 			ptr: ptrToMap(map[string]interface{}{"X": float32(3), "Y": int16(4), "Z": 1.5}),
+< 			out: ptrToMap(map[string]interface{}{"X": float64(1), "Y": float64(2), "Z": 1.5}),
+---
+> 			ptr: &map[string]interface{}{"X": float32(3), "Y": int16(4), "Z": 1.5},
+> 			out: &map[string]interface{}{"X": float64(1), "Y": float64(2), "Z": 1.5},
+> 		},
+> 		{
+> 			in:  `[2]`,
+> 			ptr: &[]int{1},
+> 			out: &[]int{2},
+> 		},
+> 		{
+> 			in:  `[2, 3]`,
+> 			ptr: &[]int{1},
+> 			out: &[]int{2, 3},
+> 		},
+> 		{
+> 			in:  `[2, 3]`,
+> 			ptr: &[...]int{1},
+> 			out: &[...]int{2},
+> 		},
+> 		{
+> 			in:  `[3]`,
+> 			ptr: &[...]int{1, 2},
+> 			out: &[...]int{3, 0},
+2010a2222,2574
+> 
+> // Test unmarshal behavior with regards to embedded unexported structs.
+> //
+> // (Issue 21357) If the embedded struct is a pointer and is unallocated,
+> // this returns an error because unmarshal cannot set the field.
+> //
+> // (Issue 24152) If the embedded struct is given an explicit name,
+> // ensure that the normal unmarshal logic does not panic in reflect.
+> //
+> // (Issue 28145) If the embedded struct is given an explicit name and has
+> // exported methods, don't cause a panic trying to get its value.
+> func TestUnmarshalEmbeddedUnexported(t *testing.T) {
+> 	type (
+> 		embed1 struct{ Q int }
+> 		embed2 struct{ Q int }
+> 		embed3 struct {
+> 			Q int64 `json:",string"`
+> 		}
+> 		S1 struct {
+> 			*embed1
+> 			R int
+> 		}
+> 		S2 struct {
+> 			*embed1
+> 			Q int
+> 		}
+> 		S3 struct {
+> 			embed1
+> 			R int
+> 		}
+> 		S4 struct {
+> 			*embed1
+> 			embed2
+> 		}
+> 		S5 struct {
+> 			*embed3
+> 			R int
+> 		}
+> 		S6 struct {
+> 			embed1 `json:"embed1"`
+> 		}
+> 		S7 struct {
+> 			embed1 `json:"embed1"`
+> 			embed2
+> 		}
+> 		S8 struct {
+> 			embed1 `json:"embed1"`
+> 			embed2 `json:"embed2"`
+> 			Q      int
+> 		}
+> 		S9 struct {
+> 			unexportedWithMethods `json:"embed"`
+> 		}
+> 	)
+> 
+> 	tests := []struct {
+> 		in  string
+> 		ptr interface{}
+> 		out interface{}
+> 		err error
+> 	}{{
+> 		// Error since we cannot set S1.embed1, but still able to set S1.R.
+> 		in:  `{"R":2,"Q":1}`,
+> 		ptr: new(S1),
+> 		out: &S1{R: 2},
+> 		err: fmt.Errorf("json: cannot set embedded pointer to unexported struct: json.embed1"),
+> 	}, {
+> 		// The top level Q field takes precedence.
+> 		in:  `{"Q":1}`,
+> 		ptr: new(S2),
+> 		out: &S2{Q: 1},
+> 	}, {
+> 		// No issue with non-pointer variant.
+> 		in:  `{"R":2,"Q":1}`,
+> 		ptr: new(S3),
+> 		out: &S3{embed1: embed1{Q: 1}, R: 2},
+> 	}, {
+> 		// No error since both embedded structs have field R, which annihilate each other.
+> 		// Thus, no attempt is made at setting S4.embed1.
+> 		in:  `{"R":2}`,
+> 		ptr: new(S4),
+> 		out: new(S4),
+> 	}, {
+> 		// Error since we cannot set S5.embed1, but still able to set S5.R.
+> 		in:  `{"R":2,"Q":1}`,
+> 		ptr: new(S5),
+> 		out: &S5{R: 2},
+> 		err: fmt.Errorf("json: cannot set embedded pointer to unexported struct: json.embed3"),
+> 	}, {
+> 		// Issue 24152, ensure decodeState.indirect does not panic.
+> 		in:  `{"embed1": {"Q": 1}}`,
+> 		ptr: new(S6),
+> 		out: &S6{embed1{1}},
+> 	}, {
+> 		// Issue 24153, check that we can still set forwarded fields even in
+> 		// the presence of a name conflict.
+> 		//
+> 		// This relies on obscure behavior of reflect where it is possible
+> 		// to set a forwarded exported field on an unexported embedded struct
+> 		// even though there is a name conflict, even when it would have been
+> 		// impossible to do so according to Go visibility rules.
+> 		// Go forbids this because it is ambiguous whether S7.Q refers to
+> 		// S7.embed1.Q or S7.embed2.Q. Since embed1 and embed2 are unexported,
+> 		// it should be impossible for an external package to set either Q.
+> 		//
+> 		// It is probably okay for a future reflect change to break this.
+> 		in:  `{"embed1": {"Q": 1}, "Q": 2}`,
+> 		ptr: new(S7),
+> 		out: &S7{embed1{1}, embed2{2}},
+> 	}, {
+> 		// Issue 24153, similar to the S7 case.
+> 		in:  `{"embed1": {"Q": 1}, "embed2": {"Q": 2}, "Q": 3}`,
+> 		ptr: new(S8),
+> 		out: &S8{embed1{1}, embed2{2}, 3},
+> 	}, {
+> 		// Issue 228145, similar to the cases above.
+> 		in:  `{"embed": {}}`,
+> 		ptr: new(S9),
+> 		out: &S9{},
+> 	}}
+> 
+> 	for i, tt := range tests {
+> 		err := Unmarshal([]byte(tt.in), tt.ptr)
+> 		if !equalError(err, tt.err) {
+> 			t.Errorf("#%d: %v, want %v", i, err, tt.err)
+> 		}
+> 		if !reflect.DeepEqual(tt.ptr, tt.out) {
+> 			t.Errorf("#%d: mismatch\ngot:  %#+v\nwant: %#+v", i, tt.ptr, tt.out)
+> 		}
+> 	}
+> }
+> 
+> func TestUnmarshalErrorAfterMultipleJSON(t *testing.T) {
+> 	tests := []struct {
+> 		in  string
+> 		err error
+> 	}{{
+> 		in:  `1 false null :`,
+> 		err: &SyntaxError{"invalid character ':' looking for beginning of value", 14},
+> 	}, {
+> 		in:  `1 [] [,]`,
+> 		err: &SyntaxError{"invalid character ',' looking for beginning of value", 7},
+> 	}, {
+> 		in:  `1 [] [true:]`,
+> 		err: &SyntaxError{"invalid character ':' after array element", 11},
+> 	}, {
+> 		in:  `1  {}    {"x"=}`,
+> 		err: &SyntaxError{"invalid character '=' after object key", 14},
+> 	}, {
+> 		in:  `falsetruenul#`,
+> 		err: &SyntaxError{"invalid character '#' in literal null (expecting 'l')", 13},
+> 	}}
+> 	for i, tt := range tests {
+> 		dec := NewDecoder(strings.NewReader(tt.in))
+> 		var err error
+> 		for {
+> 			var v interface{}
+> 			if err = dec.Decode(&v); err != nil {
+> 				break
+> 			}
+> 		}
+> 		if !reflect.DeepEqual(err, tt.err) {
+> 			t.Errorf("#%d: got %#v, want %#v", i, err, tt.err)
+> 		}
+> 	}
+> }
+> 
+> type unmarshalPanic struct{}
+> 
+> func (unmarshalPanic) UnmarshalJSON([]byte) error { panic(0xdead) }
+> 
+> func TestUnmarshalPanic(t *testing.T) {
+> 	defer func() {
+> 		if got := recover(); !reflect.DeepEqual(got, 0xdead) {
+> 			t.Errorf("panic() = (%T)(%v), want 0xdead", got, got)
+> 		}
+> 	}()
+> 	Unmarshal([]byte("{}"), &unmarshalPanic{})
+> 	t.Fatalf("Unmarshal should have panicked")
+> }
+> 
+> // The decoder used to hang if decoding into an interface pointing to its own address.
+> // See golang.org/issues/31740.
+> func TestUnmarshalRecursivePointer(t *testing.T) {
+> 	var v interface{}
+> 	v = &v
+> 	data := []byte(`{"a": "b"}`)
+> 
+> 	if err := Unmarshal(data, v); err != nil {
+> 		t.Fatal(err)
+> 	}
+> }
+> 
+> type textUnmarshalerString string
+> 
+> func (m *textUnmarshalerString) UnmarshalText(text []byte) error {
+> 	*m = textUnmarshalerString(strings.ToLower(string(text)))
+> 	return nil
+> }
+> 
+> // Test unmarshal to a map, where the map key is a user defined type.
+> // See golang.org/issues/34437.
+> func TestUnmarshalMapWithTextUnmarshalerStringKey(t *testing.T) {
+> 	var p map[textUnmarshalerString]string
+> 	if err := Unmarshal([]byte(`{"FOO": "1"}`), &p); err != nil {
+> 		t.Fatalf("Unmarshal unexpected error: %v", err)
+> 	}
+> 
+> 	if _, ok := p["foo"]; !ok {
+> 		t.Errorf(`Key "foo" does not exist in map: %v`, p)
+> 	}
+> }
+> 
+> func TestUnmarshalRescanLiteralMangledUnquote(t *testing.T) {
+> 	// See golang.org/issues/38105.
+> 	var p map[textUnmarshalerString]string
+> 	if err := Unmarshal([]byte(`{"开源":"12345开源"}`), &p); err != nil {
+> 		t.Fatalf("Unmarshal unexpected error: %v", err)
+> 	}
+> 	if _, ok := p["开源"]; !ok {
+> 		t.Errorf(`Key "开源" does not exist in map: %v`, p)
+> 	}
+> 
+> 	// See golang.org/issues/38126.
+> 	type T struct {
+> 		F1 string `json:"F1,string"`
+> 	}
+> 	t1 := T{"aaa\tbbb"}
+> 
+> 	b, err := Marshal(t1)
+> 	if err != nil {
+> 		t.Fatalf("Marshal unexpected error: %v", err)
+> 	}
+> 	var t2 T
+> 	if err := Unmarshal(b, &t2); err != nil {
+> 		t.Fatalf("Unmarshal unexpected error: %v", err)
+> 	}
+> 	if t1 != t2 {
+> 		t.Errorf("Marshal and Unmarshal roundtrip mismatch: want %q got %q", t1, t2)
+> 	}
+> 
+> 	// See golang.org/issues/39555.
+> 	input := map[textUnmarshalerString]string{"FOO": "", `"`: ""}
+> 
+> 	encoded, err := Marshal(input)
+> 	if err != nil {
+> 		t.Fatalf("Marshal unexpected error: %v", err)
+> 	}
+> 	var got map[textUnmarshalerString]string
+> 	if err := Unmarshal(encoded, &got); err != nil {
+> 		t.Fatalf("Unmarshal unexpected error: %v", err)
+> 	}
+> 	want := map[textUnmarshalerString]string{"foo": "", `"`: ""}
+> 	if !reflect.DeepEqual(want, got) {
+> 		t.Fatalf("Unexpected roundtrip result:\nwant: %q\ngot:  %q", want, got)
+> 	}
+> }
+> 
+> func TestUnmarshalMaxDepth(t *testing.T) {
+> 	testcases := []struct {
+> 		name        string
+> 		data        string
+> 		errMaxDepth bool
+> 	}{
+> 		{
+> 			name:        "ArrayUnderMaxNestingDepth",
+> 			data:        `{"a":` + strings.Repeat(`[`, 10000-1) + strings.Repeat(`]`, 10000-1) + `}`,
+> 			errMaxDepth: false,
+> 		},
+> 		{
+> 			name:        "ArrayOverMaxNestingDepth",
+> 			data:        `{"a":` + strings.Repeat(`[`, 10000) + strings.Repeat(`]`, 10000) + `}`,
+> 			errMaxDepth: true,
+> 		},
+> 		{
+> 			name:        "ArrayOverStackDepth",
+> 			data:        `{"a":` + strings.Repeat(`[`, 3000000) + strings.Repeat(`]`, 3000000) + `}`,
+> 			errMaxDepth: true,
+> 		},
+> 		{
+> 			name:        "ObjectUnderMaxNestingDepth",
+> 			data:        `{"a":` + strings.Repeat(`{"a":`, 10000-1) + `0` + strings.Repeat(`}`, 10000-1) + `}`,
+> 			errMaxDepth: false,
+> 		},
+> 		{
+> 			name:        "ObjectOverMaxNestingDepth",
+> 			data:        `{"a":` + strings.Repeat(`{"a":`, 10000) + `0` + strings.Repeat(`}`, 10000) + `}`,
+> 			errMaxDepth: true,
+> 		},
+> 		{
+> 			name:        "ObjectOverStackDepth",
+> 			data:        `{"a":` + strings.Repeat(`{"a":`, 3000000) + `0` + strings.Repeat(`}`, 3000000) + `}`,
+> 			errMaxDepth: true,
+> 		},
+> 	}
+> 
+> 	targets := []struct {
+> 		name     string
+> 		newValue func() interface{}
+> 	}{
+> 		{
+> 			name: "unstructured",
+> 			newValue: func() interface{} {
+> 				var v interface{}
+> 				return &v
+> 			},
+> 		},
+> 		{
+> 			name: "typed named field",
+> 			newValue: func() interface{} {
+> 				v := struct {
+> 					A interface{} `json:"a"`
+> 				}{}
+> 				return &v
+> 			},
+> 		},
+> 		{
+> 			name: "typed missing field",
+> 			newValue: func() interface{} {
+> 				v := struct {
+> 					B interface{} `json:"b"`
+> 				}{}
+> 				return &v
+> 			},
+> 		},
+> 		{
+> 			name: "custom unmarshaler",
+> 			newValue: func() interface{} {
+> 				v := unmarshaler{}
+> 				return &v
+> 			},
+> 		},
+> 	}
+> 
+> 	for _, tc := range testcases {
+> 		for _, target := range targets {
+> 			t.Run(target.name+"-"+tc.name, func(t *testing.T) {
+> 				err := Unmarshal([]byte(tc.data), target.newValue())
+> 				if !tc.errMaxDepth {
+> 					if err != nil {
+> 						t.Errorf("unexpected error: %v", err)
+> 					}
+> 				} else {
+> 					if err == nil {
+> 						t.Errorf("expected error containing 'exceeded max depth', got none")
+> 					} else if !strings.Contains(err.Error(), "exceeded max depth") {
+> 						t.Errorf("expected error containing 'exceeded max depth', got: %v", err)
+> 					}
+> 				}
+> 			})
+> 		}
+> 	}
+> }
+6c6
+< // RFC 4627. The mapping between JSON and Go values is described
+---
+> // RFC 7159. The mapping between JSON and Go values is described
+11,14d10
+< //
+< // Modified - to ignore unsupported types. PJS
+< // PJS Fri Mar 16 11:25:28 MDT 2018
+< //
+24d19
+< 	"runtime"
+29d23
+< 	"sync/atomic"
+54,58c48,53
+< // The angle brackets "<" and ">" are escaped to "\u003c" and "\u003e"
+< // to keep some browsers from misinterpreting JSON output as HTML.
+< // Ampersand "&" is also escaped to "\u0026" for the same reason.
+< // This escaping can be disabled using an Encoder that had SetEscapeHTML(false)
+< // called on it.
+---
+> // So that the JSON will be safe to embed inside HTML <script> tags,
+> // the string is encoded using HTMLEscape,
+> // which replaces "<", ">", "&", U+2028, and U+2029 are escaped
+> // to "\u003c","\u003e", "\u0026", "\u2028", and "\u2029".
+> // This replacement can be disabled when using an Encoder,
+> // by calling SetEscapeHTML(false).
+145c140
+< //   - string keys are used directly
+---
+> //   - keys of any string type are used directly
+161,166c156
+< // an infinite recursion.
+< //
+< // Modified: PJS - ignore unsupported types - output as "unsupported:type:%T"
+< // Channel, complex, and function values cannot be encoded in JSON.
+< // Attempting to encode such a value causes Marshal to return
+< // an UnsupportedTypeError.
+---
+> // an error.
+169c159,160
+< 	e := &encodeState{}
+---
+> 	e := newEncodeState()
+> 
+174c165,169
+< 	return e.Bytes(), nil
+---
+> 	buf := append([]byte(nil), e.Bytes()...)
+> 
+> 	encodeStatePool.Put(e)
+> 
+> 	return buf, nil
+177a173,174
+> // Each JSON element in the output will begin on a new line beginning with prefix
+> // followed by one or more copies of indent according to the indentation nesting.
+241a239,240
+> // An UnsupportedValueError is returned by Marshal when attempting
+> // to encode an unsupported value.
+255,256c254,255
+< // This error is no longer generated but is kept for backwards compatibility
+< // with programs that might mention it.
+---
+> //
+> // Deprecated: No longer used; kept for compatibility.
+264a264
+> // A MarshalerError represents an error from calling a MarshalJSON or MarshalText method.
+266,267c266,268
+< 	Type reflect.Type
+< 	Err  error
+---
+> 	Type       reflect.Type
+> 	Err        error
+> 	sourceFunc string
+271c272,278
+< 	return "json: error calling MarshalJSON for type " + e.Type.String() + ": " + e.Err.Error()
+---
+> 	srcFunc := e.sourceFunc
+> 	if srcFunc == "" {
+> 		srcFunc = "MarshalJSON"
+> 	}
+> 	return "json: error calling " + srcFunc +
+> 		" for type " + e.Type.String() +
+> 		": " + e.Err.Error()
+273a281,283
+> // Unwrap returns the underlying error.
+> func (e *MarshalerError) Unwrap() error { return e.Err }
+> 
+279a290,297
+> 
+> 	// Keep track of what pointers we've seen in the current recursive call
+> 	// path, to avoid cycles that could lead to a stack overflow. Only do
+> 	// the relatively expensive map operations if ptrLevel is larger than
+> 	// startDetectingCyclesAfter, so that we skip the work if we're within a
+> 	// reasonable amount of nested pointers deep.
+> 	ptrLevel uint
+> 	ptrSeen  map[interface{}]struct{}
+281a300,301
+> const startDetectingCyclesAfter = 1000
+> 
+287a308,311
+> 		if len(e.ptrSeen) > 0 {
+> 			panic("ptrEncoder.encode should have emptied ptrSeen via defers")
+> 		}
+> 		e.ptrLevel = 0
+290c314
+< 	return new(encodeState)
+---
+> 	return &encodeState{ptrSeen: make(map[interface{}]struct{})}
+292a317,321
+> // jsonError is an error wrapper type for internal use only.
+> // Panics with errors are wrapped in jsonError so that the top-level recover
+> // can distinguish intentional panics from this package.
+> type jsonError struct{ error }
+> 
+296c325,327
+< 			if _, ok := r.(runtime.Error); ok {
+---
+> 			if je, ok := r.(jsonError); ok {
+> 				err = je.error
+> 			} else {
+299,302d329
+< 			if s, ok := r.(string); ok {
+< 				panic(s)
+< 			}
+< 			err = r.(error)
+308a336
+> // error aborts the encoding by panicking with err wrapped in jsonError.
+310c338
+< 	panic(err)
+---
+> 	panic(jsonError{err})
+383,384c411,412
+< 	marshalerType     = reflect.TypeOf(new(Marshaler)).Elem()
+< 	textMarshalerType = reflect.TypeOf(new(encoding.TextMarshaler)).Elem()
+---
+> 	marshalerType     = reflect.TypeOf((*Marshaler)(nil)).Elem()
+> 	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+389a418,424
+> 	// If we have a non-pointer value whose type implements
+> 	// Marshaler with a value receiver, then we're better off taking
+> 	// the address of the value - otherwise we end up with an
+> 	// allocation as we cast the value to an interface.
+> 	if t.Kind() != reflect.Ptr && allowAddr && reflect.PtrTo(t).Implements(marshalerType) {
+> 		return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
+> 	}
+393,396c428,429
+< 	if t.Kind() != reflect.Ptr && allowAddr {
+< 		if reflect.PtrTo(t).Implements(marshalerType) {
+< 			return newCondAddrEncoder(addrMarshalerEncoder, newTypeEncoder(t, false))
+< 		}
+---
+> 	if t.Kind() != reflect.Ptr && allowAddr && reflect.PtrTo(t).Implements(textMarshalerType) {
+> 		return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false))
+398d430
+< 
+402,406d433
+< 	if t.Kind() != reflect.Ptr && allowAddr {
+< 		if reflect.PtrTo(t).Implements(textMarshalerType) {
+< 			return newCondAddrEncoder(addrTextMarshalerEncoder, newTypeEncoder(t, false))
+< 		}
+< 	}
+458c485
+< 		e.error(&MarshalerError{v.Type(), err})
+---
+> 		e.error(&MarshalerError{v.Type(), err, "MarshalJSON"})
+462c489
+< func addrMarshalerEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+---
+> func addrMarshalerEncoder(e *encodeState, v reflect.Value, opts encOpts) {
+472c499
+< 		err = compact(&e.Buffer, b, true)
+---
+> 		err = compact(&e.Buffer, b, opts.escapeHTML)
+475c502
+< 		e.error(&MarshalerError{v.Type(), err})
+---
+> 		e.error(&MarshalerError{v.Type(), err, "MarshalJSON"})
+484c511,515
+< 	m := v.Interface().(encoding.TextMarshaler)
+---
+> 	m, ok := v.Interface().(encoding.TextMarshaler)
+> 	if !ok {
+> 		e.WriteString("null")
+> 		return
+> 	}
+487c518
+< 		e.error(&MarshalerError{v.Type(), err})
+---
+> 		e.error(&MarshalerError{v.Type(), err, "MarshalText"})
+501c532
+< 		e.error(&MarshalerError{v.Type(), err})
+---
+> 		e.error(&MarshalerError{v.Type(), err, "MarshalText"})
+598a630,632
+> 		if opts.quoted {
+> 			e.WriteByte('"')
+> 		}
+599a634,636
+> 		if opts.quoted {
+> 			e.WriteByte('"')
+> 		}
+603,607c640,645
+< 		sb, err := Marshal(v.String())
+< 		if err != nil {
+< 			e.error(err)
+< 		}
+< 		e.string(string(sb), opts.escapeHTML)
+---
+> 		e2 := newEncodeState()
+> 		// Since we encode the string twice, we only need to escape HTML
+> 		// the first time.
+> 		e2.string(v.String(), opts.escapeHTML)
+> 		e.stringBytes(e2.Bytes(), false)
+> 		encodeStatePool.Put(e2)
+612a651,710
+> // isValidNumber reports whether s is a valid JSON number literal.
+> func isValidNumber(s string) bool {
+> 	// This function implements the JSON numbers grammar.
+> 	// See https://tools.ietf.org/html/rfc7159#section-6
+> 	// and https://www.json.org/img/number.png
+> 
+> 	if s == "" {
+> 		return false
+> 	}
+> 
+> 	// Optional -
+> 	if s[0] == '-' {
+> 		s = s[1:]
+> 		if s == "" {
+> 			return false
+> 		}
+> 	}
+> 
+> 	// Digits
+> 	switch {
+> 	default:
+> 		return false
+> 
+> 	case s[0] == '0':
+> 		s = s[1:]
+> 
+> 	case '1' <= s[0] && s[0] <= '9':
+> 		s = s[1:]
+> 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+> 			s = s[1:]
+> 		}
+> 	}
+> 
+> 	// . followed by 1 or more digits.
+> 	if len(s) >= 2 && s[0] == '.' && '0' <= s[1] && s[1] <= '9' {
+> 		s = s[2:]
+> 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+> 			s = s[1:]
+> 		}
+> 	}
+> 
+> 	// e or E followed by an optional - or + and
+> 	// 1 or more digits.
+> 	if len(s) >= 2 && (s[0] == 'e' || s[0] == 'E') {
+> 		s = s[1:]
+> 		if s[0] == '+' || s[0] == '-' {
+> 			s = s[1:]
+> 			if s == "" {
+> 				return false
+> 			}
+> 		}
+> 		for len(s) > 0 && '0' <= s[0] && s[0] <= '9' {
+> 			s = s[1:]
+> 		}
+> 	}
+> 
+> 	// Make sure we are at the end.
+> 	return s == ""
+> }
+> 
+621,628c719,721
+< // PJS - orig - func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+< // PJS - orig - 	e.error(&UnsupportedTypeError{v.Type()})
+< // PJS - orig - }
+< func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) { // PJS
+< 	f := UnsupportedTypeError{v.Type()}  // PJS
+< 	e.WriteString(`"` + f.Error() + `"`) // PJS
+< 	// e.error(&UnsupportedTypeError{v.Type()}) // PJS
+< } // PJS
+---
+> func unsupportedTypeEncoder(e *encodeState, v reflect.Value, _ encOpts) {
+> 	e.error(&UnsupportedTypeError{v.Type()})
+> }
+631,632c724
+< 	fields    []field
+< 	fieldEncs []encoderFunc
+---
+> 	fields structFields
+635,640c727,750
+< func (se *structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+< 	e.WriteByte('{')
+< 	first := true
+< 	for i, f := range se.fields {
+< 		fv := fieldByIndex(v, f.index)
+< 		if !fv.IsValid() || f.omitEmpty && isEmptyValue(fv) {
+---
+> type structFields struct {
+> 	list      []field
+> 	nameIndex map[string]int
+> }
+> 
+> func (se structEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+> 	next := byte('{')
+> FieldLoop:
+> 	for i := range se.fields.list {
+> 		f := &se.fields.list[i]
+> 
+> 		// Find the nested struct field by following f.index.
+> 		fv := v
+> 		for _, i := range f.index {
+> 			if fv.Kind() == reflect.Ptr {
+> 				if fv.IsNil() {
+> 					continue FieldLoop
+> 				}
+> 				fv = fv.Elem()
+> 			}
+> 			fv = fv.Field(i)
+> 		}
+> 
+> 		if f.omitEmpty && isEmptyValue(fv) {
+643,644c753,756
+< 		if first {
+< 			first = false
+---
+> 		e.WriteByte(next)
+> 		next = ','
+> 		if opts.escapeHTML {
+> 			e.WriteString(f.nameEscHTML)
+646c758
+< 			e.WriteByte(',')
+---
+> 			e.WriteString(f.nameNonEsc)
+648,649d759
+< 		e.string(f.name, opts.escapeHTML)
+< 		e.WriteByte(':')
+651c761,766
+< 		se.fieldEncs[i](e, fv, opts)
+---
+> 		f.encoder(e, fv, opts)
+> 	}
+> 	if next == '{' {
+> 		e.WriteString("{}")
+> 	} else {
+> 		e.WriteByte('}')
+653d767
+< 	e.WriteByte('}')
+657,664c771
+< 	fields := cachedTypeFields(t)
+< 	se := &structEncoder{
+< 		fields:    fields,
+< 		fieldEncs: make([]encoderFunc, len(fields)),
+< 	}
+< 	for i, f := range fields {
+< 		se.fieldEncs[i] = typeEncoder(typeByIndex(t, f.index))
+< 	}
+---
+> 	se := structEncoder{fields: cachedTypeFields(t)}
+672c779
+< func (me *mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+---
+> func (me mapEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+676a784,793
+> 	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
+> 		// We're a large number of nested ptrEncoder.encode calls deep;
+> 		// start checking if we've run into a pointer cycle.
+> 		ptr := v.Pointer()
+> 		if _, ok := e.ptrSeen[ptr]; ok {
+> 			e.error(&UnsupportedValueError{v, fmt.Sprintf("encountered a cycle via %s", v.Type())})
+> 		}
+> 		e.ptrSeen[ptr] = struct{}{}
+> 		defer delete(e.ptrSeen, ptr)
+> 	}
+680,683c797,801
+< 	keys := v.MapKeys()
+< 	sv := make([]reflectWithString, len(keys))
+< 	for i, v := range keys {
+< 		sv[i].v = v
+---
+> 	sv := make([]reflectWithString, v.Len())
+> 	mi := v.MapRange()
+> 	for i := 0; mi.Next(); i++ {
+> 		sv[i].k = mi.Key()
+> 		sv[i].v = mi.Value()
+685c803
+< 			e.error(&MarshalerError{v.Type(), err})
+---
+> 			e.error(fmt.Errorf("json: encoding error for type %q: %q", v.Type().String(), err.Error()))
+688c806
+< 	sort.Slice(sv, func(i, j int) bool { return sv[i].s < sv[j].s })
+---
+> 	sort.Slice(sv, func(i, j int) bool { return sv[i].ks < sv[j].ks })
+694c812
+< 		e.string(kv.s, opts.escapeHTML)
+---
+> 		e.string(kv.ks, opts.escapeHTML)
+696c814
+< 		me.elemEnc(e, v.MapIndex(kv.v), opts)
+---
+> 		me.elemEnc(e, kv.v, opts)
+698a817
+> 	e.ptrLevel--
+711c830
+< 	me := &mapEncoder{typeEncoder(t.Elem())}
+---
+> 	me := mapEncoder{typeEncoder(t.Elem())}
+722,724c841,851
+< 	if len(s) < 1024 {
+< 		// for small buffers, using Encode directly is much faster.
+< 		dst := make([]byte, base64.StdEncoding.EncodedLen(len(s)))
+---
+> 	encodedLen := base64.StdEncoding.EncodedLen(len(s))
+> 	if encodedLen <= len(e.scratch) {
+> 		// If the encoded bytes fit in e.scratch, avoid an extra
+> 		// allocation and use the cheaper Encoding.Encode.
+> 		dst := e.scratch[:encodedLen]
+> 		base64.StdEncoding.Encode(dst, s)
+> 		e.Write(dst)
+> 	} else if encodedLen <= 1024 {
+> 		// The encoded bytes are short enough to allocate for, and
+> 		// Encoding.Encode is still cheaper.
+> 		dst := make([]byte, encodedLen)
+728,729c855,856
+< 		// for large buffers, avoid unnecessary extra temporary
+< 		// buffer space.
+---
+> 		// The encoded bytes are too long to cheaply allocate, and
+> 		// Encoding.Encode is no longer noticeably cheaper.
+742c869
+< func (se *sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+---
+> func (se sliceEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+746a874,888
+> 	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
+> 		// We're a large number of nested ptrEncoder.encode calls deep;
+> 		// start checking if we've run into a pointer cycle.
+> 		// Here we use a struct to memorize the pointer to the first element of the slice
+> 		// and its length.
+> 		ptr := struct {
+> 			ptr uintptr
+> 			len int
+> 		}{v.Pointer(), v.Len()}
+> 		if _, ok := e.ptrSeen[ptr]; ok {
+> 			e.error(&UnsupportedValueError{v, fmt.Sprintf("encountered a cycle via %s", v.Type())})
+> 		}
+> 		e.ptrSeen[ptr] = struct{}{}
+> 		defer delete(e.ptrSeen, ptr)
+> 	}
+747a890
+> 	e.ptrLevel--
+758c901
+< 	enc := &sliceEncoder{newArrayEncoder(t)}
+---
+> 	enc := sliceEncoder{newArrayEncoder(t)}
+766c909
+< func (ae *arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+---
+> func (ae arrayEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+779c922
+< 	enc := &arrayEncoder{typeEncoder(t.Elem())}
+---
+> 	enc := arrayEncoder{typeEncoder(t.Elem())}
+787c930
+< func (pe *ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+---
+> func (pe ptrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+791a935,944
+> 	if e.ptrLevel++; e.ptrLevel > startDetectingCyclesAfter {
+> 		// We're a large number of nested ptrEncoder.encode calls deep;
+> 		// start checking if we've run into a pointer cycle.
+> 		ptr := v.Interface()
+> 		if _, ok := e.ptrSeen[ptr]; ok {
+> 			e.error(&UnsupportedValueError{v, fmt.Sprintf("encountered a cycle via %s", v.Type())})
+> 		}
+> 		e.ptrSeen[ptr] = struct{}{}
+> 		defer delete(e.ptrSeen, ptr)
+> 	}
+792a946
+> 	e.ptrLevel--
+796c950
+< 	enc := &ptrEncoder{typeEncoder(t.Elem())}
+---
+> 	enc := ptrEncoder{typeEncoder(t.Elem())}
+804c958
+< func (ce *condAddrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+---
+> func (ce condAddrEncoder) encode(e *encodeState, v reflect.Value, opts encOpts) {
+815c969
+< 	enc := &condAddrEncoder{canAddrEnc: canAddrEnc, elseEnc: elseEnc}
+---
+> 	enc := condAddrEncoder{canAddrEnc: canAddrEnc, elseEnc: elseEnc}
+825c979
+< 		case strings.ContainsRune("!#$%&()*+-./:<=>?@[]^_{|}~ ", c):
+---
+> 		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+829,832c983,984
+< 		default:
+< 			if !unicode.IsLetter(c) && !unicode.IsDigit(c) {
+< 				return false
+< 			}
+---
+> 		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+> 			return false
+838,850d989
+< func fieldByIndex(v reflect.Value, index []int) reflect.Value {
+< 	for _, i := range index {
+< 		if v.Kind() == reflect.Ptr {
+< 			if v.IsNil() {
+< 				return reflect.Value{}
+< 			}
+< 			v = v.Elem()
+< 		}
+< 		v = v.Field(i)
+< 	}
+< 	return v
+< }
+< 
+862,863c1001,1003
+< 	v reflect.Value
+< 	s string
+---
+> 	k  reflect.Value
+> 	v  reflect.Value
+> 	ks string
+867,868c1007,1008
+< 	if w.v.Kind() == reflect.String {
+< 		w.s = w.v.String()
+---
+> 	if w.k.Kind() == reflect.String {
+> 		w.ks = w.k.String()
+871c1011,1014
+< 	if tm, ok := w.v.Interface().(encoding.TextMarshaler); ok {
+---
+> 	if tm, ok := w.k.Interface().(encoding.TextMarshaler); ok {
+> 		if w.k.Kind() == reflect.Ptr && w.k.IsNil() {
+> 			return nil
+> 		}
+873c1016
+< 		w.s = string(buf)
+---
+> 		w.ks = string(buf)
+876c1019
+< 	switch w.v.Kind() {
+---
+> 	switch w.k.Kind() {
+878c1021
+< 		w.s = strconv.FormatInt(w.v.Int(), 10)
+---
+> 		w.ks = strconv.FormatInt(w.k.Int(), 10)
+881c1024
+< 		w.s = strconv.FormatUint(w.v.Uint(), 10)
+---
+> 		w.ks = strconv.FormatUint(w.k.Uint(), 10)
+888,889c1031
+< func (e *encodeState) string(s string, escapeHTML bool) int {
+< 	len0 := e.Len()
+---
+> func (e *encodeState) string(s string, escapeHTML bool) {
+900a1043
+> 			e.WriteByte('\\')
+903d1045
+< 				e.WriteByte('\\')
+906d1047
+< 				e.WriteByte('\\')
+909d1049
+< 				e.WriteByte('\\')
+912d1051
+< 				e.WriteByte('\\')
+920c1059
+< 				e.WriteString(`\u00`)
+---
+> 				e.WriteString(`u00`)
+961d1099
+< 	return e.Len() - len0
+965,966c1103
+< func (e *encodeState) stringBytes(s []byte, escapeHTML bool) int {
+< 	len0 := e.Len()
+---
+> func (e *encodeState) stringBytes(s []byte, escapeHTML bool) {
+977a1115
+> 			e.WriteByte('\\')
+980d1117
+< 				e.WriteByte('\\')
+983d1119
+< 				e.WriteByte('\\')
+986d1121
+< 				e.WriteByte('\\')
+989d1123
+< 				e.WriteByte('\\')
+997c1131
+< 				e.WriteString(`\u00`)
+---
+> 				e.WriteString(`u00`)
+1038d1171
+< 	return e.Len() - len0
+1046a1180,1182
+> 	nameNonEsc  string // `"` + name + `":`
+> 	nameEscHTML string // `"` + HTMLEscape(name) + `":`
+> 
+1052d1187
+< }
+1054,1057c1189
+< func fillField(f field) field {
+< 	f.nameBytes = []byte(f.name)
+< 	f.equalFold = foldFunc(f.nameBytes)
+< 	return f
+---
+> 	encoder encoderFunc
+1082c1214
+< func typeFields(t reflect.Type) []field {
+---
+> func typeFields(t reflect.Type) structFields {
+1088,1089c1220
+< 	count := map[reflect.Type]int{}
+< 	nextCount := map[reflect.Type]int{}
+---
+> 	var count, nextCount map[reflect.Type]int
+1096a1228,1230
+> 	// Buffer to run HTMLEscape on field names.
+> 	var nameEscBuf bytes.Buffer
+> 
+1115,1118c1249
+< 					// If embedded, StructField.PkgPath is not a reliable
+< 					// indicator of whether the field is exported.
+< 					// See https://golang.org/issue/21122
+< 					if !isExported(t.Name()) && t.Kind() != reflect.Struct {
+---
+> 					if !sf.IsExported() && t.Kind() != reflect.Struct {
+1120,1121d1250
+< 						// Do not ignore embedded fields of unexported struct types
+< 						// since they may have exported fields.
+1124c1253,1255
+< 				} else if sf.PkgPath != "" {
+---
+> 					// Do not ignore embedded fields of unexported struct types
+> 					// since they may have exported fields.
+> 				} else if !sf.IsExported() {
+1152c1283
+< 						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+---
+> 						reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+1165c1296
+< 					fields = append(fields, fillField(field{
+---
+> 					field := field{
+1172c1303,1315
+< 					}))
+---
+> 					}
+> 					field.nameBytes = []byte(field.name)
+> 					field.equalFold = foldFunc(field.nameBytes)
+> 
+> 					// Build nameEscHTML and nameNonEsc ahead of time.
+> 					nameEscBuf.Reset()
+> 					nameEscBuf.WriteString(`"`)
+> 					HTMLEscape(&nameEscBuf, field.nameBytes)
+> 					nameEscBuf.WriteString(`":`)
+> 					field.nameEscHTML = nameEscBuf.String()
+> 					field.nameNonEsc = `"` + field.name + `":`
+> 
+> 					fields = append(fields, field)
+1186c1329
+< 					next = append(next, fillField(field{name: ft.Name(), index: index, typ: ft}))
+---
+> 					next = append(next, field{name: ft.Name(), index: index, typ: ft})
+1240,1246c1383,1391
+< 	return fields
+< }
+< 
+< // isExported reports whether the identifier is exported.
+< func isExported(id string) bool {
+< 	r, _ := utf8.DecodeRuneInString(id)
+< 	return unicode.IsUpper(r)
+---
+> 	for i := range fields {
+> 		f := &fields[i]
+> 		f.encoder = typeEncoder(typeByIndex(t, f.index))
+> 	}
+> 	nameIndex := make(map[string]int, len(fields))
+> 	for i, field := range fields {
+> 		nameIndex[field.name] = i
+> 	}
+> 	return structFields{fields, nameIndex}
+1256,1281c1401,1404
+< 	// The fields are sorted in increasing index-length order. The winner
+< 	// must therefore be one with the shortest index length. Drop all
+< 	// longer entries, which is easy: just truncate the slice.
+< 	length := len(fields[0].index)
+< 	tagged := -1 // Index of first tagged field.
+< 	for i, f := range fields {
+< 		if len(f.index) > length {
+< 			fields = fields[:i]
+< 			break
+< 		}
+< 		if f.tag {
+< 			if tagged >= 0 {
+< 				// Multiple tagged fields at the same level: conflict.
+< 				// Return no field.
+< 				return field{}, false
+< 			}
+< 			tagged = i
+< 		}
+< 	}
+< 	if tagged >= 0 {
+< 		return fields[tagged], true
+< 	}
+< 	// All remaining fields have the same length. If there's more than one,
+< 	// we have a conflict (two fields named "X" at the same level) and we
+< 	// return no field.
+< 	if len(fields) > 1 {
+---
+> 	// The fields are sorted in increasing index-length order, then by presence of tag.
+> 	// That means that the first field is the dominant one. We need only check
+> 	// for error cases: two fields at top level, either both tagged or neither tagged.
+> 	if len(fields) > 1 && len(fields[0].index) == len(fields[1].index) && fields[0].tag == fields[1].tag {
+1287,1290c1410
+< var fieldCache struct {
+< 	value atomic.Value // map[reflect.Type][]field
+< 	mu    sync.Mutex   // used only by writers
+< }
+---
+> var fieldCache sync.Map // map[reflect.Type]structFields
+1293,1316c1413,1418
+< func cachedTypeFields(t reflect.Type) []field {
+< 	m, _ := fieldCache.value.Load().(map[reflect.Type][]field)
+< 	f := m[t]
+< 	if f != nil {
+< 		return f
+< 	}
+< 
+< 	// Compute fields without lock.
+< 	// Might duplicate effort but won't hold other computations back.
+< 	f = typeFields(t)
+< 	if f == nil {
+< 		f = []field{}
+< 	}
+< 
+< 	fieldCache.mu.Lock()
+< 	m, _ = fieldCache.value.Load().(map[reflect.Type][]field)
+< 	newM := make(map[reflect.Type][]field, len(m)+1)
+< 	for k, v := range m {
+< 		newM[k] = v
+< 	}
+< 	newM[t] = f
+< 	fieldCache.value.Store(newM)
+< 	fieldCache.mu.Unlock()
+< 	return f
+---
+> func cachedTypeFields(t reflect.Type) structFields {
+> 	if f, ok := fieldCache.Load(t); ok {
+> 		return f.(structFields)
+> 	}
+> 	f, _ := fieldCache.LoadOrStore(t, typeFields(t))
+> 	return f.(structFields)
+8a9
+> 	"encoding"
+74,76c75,79
+< 	BoolStr bool   `json:",string"`
+< 	IntStr  int64  `json:",string"`
+< 	StrStr  string `json:",string"`
+---
+> 	BoolStr    bool    `json:",string"`
+> 	IntStr     int64   `json:",string"`
+> 	UintptrStr uintptr `json:",string"`
+> 	StrStr     string  `json:",string"`
+> 	NumberStr  Number  `json:",string"`
+79,95c82,119
+< var stringTagExpected = `{
+<  "BoolStr": "true",
+<  "IntStr": "42",
+<  "StrStr": "\"xzbit\""
+< }`
+< 
+< func TestStringTag(t *testing.T) {
+< 	var s StringTag
+< 	s.BoolStr = true
+< 	s.IntStr = 42
+< 	s.StrStr = "xzbit"
+< 	got, err := MarshalIndent(&s, "", " ")
+< 	if err != nil {
+< 		t.Fatal(err)
+< 	}
+< 	if got := string(got); got != stringTagExpected {
+< 		t.Fatalf(" got: %s\nwant: %s\n", got, stringTagExpected)
+---
+> func TestRoundtripStringTag(t *testing.T) {
+> 	tests := []struct {
+> 		name string
+> 		in   StringTag
+> 		want string // empty to just test that we roundtrip
+> 	}{
+> 		{
+> 			name: "AllTypes",
+> 			in: StringTag{
+> 				BoolStr:    true,
+> 				IntStr:     42,
+> 				UintptrStr: 44,
+> 				StrStr:     "xzbit",
+> 				NumberStr:  "46",
+> 			},
+> 			want: `{
+> 				"BoolStr": "true",
+> 				"IntStr": "42",
+> 				"UintptrStr": "44",
+> 				"StrStr": "\"xzbit\"",
+> 				"NumberStr": "46"
+> 			}`,
+> 		},
+> 		{
+> 			// See golang.org/issues/38173.
+> 			name: "StringDoubleEscapes",
+> 			in: StringTag{
+> 				StrStr:    "\b\f\n\r\t\"\\",
+> 				NumberStr: "0", // just to satisfy the roundtrip
+> 			},
+> 			want: `{
+> 				"BoolStr": "false",
+> 				"IntStr": "0",
+> 				"UintptrStr": "0",
+> 				"StrStr": "\"\\u0008\\u000c\\n\\r\\t\\\"\\\\\"",
+> 				"NumberStr": "0"
+> 			}`,
+> 		},
+96a121,131
+> 	for _, test := range tests {
+> 		t.Run(test.name, func(t *testing.T) {
+> 			// Indent with a tab prefix to make the multi-line string
+> 			// literals in the table nicer to read.
+> 			got, err := MarshalIndent(&test.in, "\t\t\t", "\t")
+> 			if err != nil {
+> 				t.Fatal(err)
+> 			}
+> 			if got := string(got); got != test.want {
+> 				t.Fatalf(" got: %s\nwant: %s\n", got, test.want)
+> 			}
+98,105c133,141
+< 	// Verify that it round-trips.
+< 	var s2 StringTag
+< 	err = NewDecoder(bytes.NewReader(got)).Decode(&s2)
+< 	if err != nil {
+< 		t.Fatalf("Decode: %v", err)
+< 	}
+< 	if !reflect.DeepEqual(s, s2) {
+< 		t.Fatalf("decode didn't match.\nsource: %#v\nEncoded as:\n%s\ndecode: %#v", s, string(got), s2)
+---
+> 			// Verify that it round-trips.
+> 			var s2 StringTag
+> 			if err := Unmarshal(got, &s2); err != nil {
+> 				t.Fatalf("Decode: %v", err)
+> 			}
+> 			if !reflect.DeepEqual(test.in, s2) {
+> 				t.Fatalf("decode didn't match.\nsource: %#v\nEncoded as:\n%s\ndecode: %#v", test.in, string(got), s2)
+> 			}
+> 		})
+133a170,224
+> type SamePointerNoCycle struct {
+> 	Ptr1, Ptr2 *SamePointerNoCycle
+> }
+> 
+> var samePointerNoCycle = &SamePointerNoCycle{}
+> 
+> type PointerCycle struct {
+> 	Ptr *PointerCycle
+> }
+> 
+> var pointerCycle = &PointerCycle{}
+> 
+> type PointerCycleIndirect struct {
+> 	Ptrs []interface{}
+> }
+> 
+> type RecursiveSlice []RecursiveSlice
+> 
+> var (
+> 	pointerCycleIndirect = &PointerCycleIndirect{}
+> 	mapCycle             = make(map[string]interface{})
+> 	sliceCycle           = []interface{}{nil}
+> 	sliceNoCycle         = []interface{}{nil, nil}
+> 	recursiveSliceCycle  = []RecursiveSlice{nil}
+> )
+> 
+> func init() {
+> 	ptr := &SamePointerNoCycle{}
+> 	samePointerNoCycle.Ptr1 = ptr
+> 	samePointerNoCycle.Ptr2 = ptr
+> 
+> 	pointerCycle.Ptr = pointerCycle
+> 	pointerCycleIndirect.Ptrs = []interface{}{pointerCycleIndirect}
+> 
+> 	mapCycle["x"] = mapCycle
+> 	sliceCycle[0] = sliceCycle
+> 	sliceNoCycle[1] = sliceNoCycle[:1]
+> 	for i := startDetectingCyclesAfter; i > 0; i-- {
+> 		sliceNoCycle = []interface{}{sliceNoCycle}
+> 	}
+> 	recursiveSliceCycle[0] = recursiveSliceCycle
+> }
+> 
+> func TestSamePointerNoCycle(t *testing.T) {
+> 	if _, err := Marshal(samePointerNoCycle); err != nil {
+> 		t.Fatalf("unexpected error: %v", err)
+> 	}
+> }
+> 
+> func TestSliceNoCycle(t *testing.T) {
+> 	if _, err := Marshal(sliceNoCycle); err != nil {
+> 		t.Fatalf("unexpected error: %v", err)
+> 	}
+> }
+> 
+137a229,233
+> 	pointerCycle,
+> 	pointerCycleIndirect,
+> 	mapCycle,
+> 	sliceCycle,
+> 	recursiveSliceCycle,
+151a248,263
+> // Issue 43207
+> func TestMarshalTextFloatMap(t *testing.T) {
+> 	m := map[textfloat]string{
+> 		textfloat(math.NaN()): "1",
+> 		textfloat(math.NaN()): "1",
+> 	}
+> 	got, err := Marshal(m)
+> 	if err != nil {
+> 		t.Errorf("Marshal() error: %v", err)
+> 	}
+> 	want := `{"TF:NaN":"1","TF:NaN":"1"}`
+> 	if string(got) != want {
+> 		t.Errorf("Marshal() = %s, want %s", got, want)
+> 	}
+> }
+> 
+404a517,529
+> 	}, {
+> 		// If an anonymous struct pointer field is nil, we should ignore
+> 		// the embedded fields behind it. Not properly doing so may
+> 		// result in the wrong output or reflect panics.
+> 		label: "EmbeddedFieldBehindNilPointer",
+> 		makeInput: func() interface{} {
+> 			type (
+> 				S2 struct{ Field string }
+> 				S  struct{ *S2 }
+> 			)
+> 			return S{}
+> 		},
+> 		want: `{}`,
+440,442c565,568
+< // Issue 16042. Even if a nil interface value is passed in
+< // as long as it implements MarshalJSON, it should be marshaled.
+< type nilMarshaler string
+---
+> // golang.org/issue/16042.
+> // Even if a nil interface value is passed in, as long as
+> // it implements Marshaler, it should be marshaled.
+> type nilJSONMarshaler string
+444c570
+< func (nm *nilMarshaler) MarshalJSON() ([]byte, error) {
+---
+> func (nm *nilJSONMarshaler) MarshalJSON() ([]byte, error) {
+451c577,589
+< // Issue 16042.
+---
+> // golang.org/issue/34235.
+> // Even if a nil interface value is passed in, as long as
+> // it implements encoding.TextMarshaler, it should be marshaled.
+> type nilTextMarshaler string
+> 
+> func (nm *nilTextMarshaler) MarshalText() ([]byte, error) {
+> 	if nm == nil {
+> 		return []byte("0zenil0"), nil
+> 	}
+> 	return []byte("zenil:" + string(*nm)), nil
+> }
+> 
+> // See golang.org/issue/16042 and golang.org/issue/34235.
+465,466c603,607
+< 		{v: struct{ M Marshaler }{(*nilMarshaler)(nil)}, want: `{"M":"0zenil0"}`},
+< 		{v: struct{ M interface{} }{(*nilMarshaler)(nil)}, want: `{"M":null}`},
+---
+> 		{v: struct{ M Marshaler }{(*nilJSONMarshaler)(nil)}, want: `{"M":"0zenil0"}`},
+> 		{v: struct{ M interface{} }{(*nilJSONMarshaler)(nil)}, want: `{"M":null}`},
+> 		{v: struct{ M encoding.TextMarshaler }{}, want: `{"M":null}`},
+> 		{v: struct{ M encoding.TextMarshaler }{(*nilTextMarshaler)(nil)}, want: `{"M":"0zenil0"}`},
+> 		{v: struct{ M interface{} }{(*nilTextMarshaler)(nil)}, want: `{"M":null}`},
+566a708,710
+> 		if testing.Short() && i > 1000 {
+> 			i = unicode.MaxRune
+> 		}
+728a873,876
+> type textfloat float64
+> 
+> func (f textfloat) MarshalText() ([]byte, error) { return tenc(`TF:%0.2f`, f) }
+> 
+746a895
+> 		{[]textfloat{12, 3}, `["TF:12.00","TF:3.00"]`},
+776a926,940
+> // https://golang.org/issue/33675
+> func TestNilMarshalerTextMapKey(t *testing.T) {
+> 	b, err := Marshal(map[*unmarshalerText]int{
+> 		(*unmarshalerText)(nil): 1,
+> 		{"A", "B"}:              2,
+> 	})
+> 	if err != nil {
+> 		t.Fatalf("Failed to Marshal *text.Marshaler: %v", err)
+> 	}
+> 	const want = `{"":1,"A:B":2}`
+> 	if string(b) != want {
+> 		t.Errorf("Marshal map with *text.Marshaler keys: got %#q, want %#q", b, want)
+> 	}
+> }
+> 
+850a1015,1017
+> 		if testing.Short() && i < len(digits)-4 {
+> 			break
+> 		}
+946c1113
+< 		// See https://github.com/golang/go/issues/14493#issuecomment-255857318
+---
+> 		// See https://golang.org/issues/14493#issuecomment-255857318
+980a1148,1203
+> 
+> type marshalPanic struct{}
+> 
+> func (marshalPanic) MarshalJSON() ([]byte, error) { panic(0xdead) }
+> 
+> func TestMarshalPanic(t *testing.T) {
+> 	defer func() {
+> 		if got := recover(); !reflect.DeepEqual(got, 0xdead) {
+> 			t.Errorf("panic() = (%T)(%v), want 0xdead", got, got)
+> 		}
+> 	}()
+> 	Marshal(&marshalPanic{})
+> 	t.Error("Marshal should have panicked")
+> }
+> 
+> func TestMarshalUncommonFieldNames(t *testing.T) {
+> 	v := struct {
+> 		A0, À, Aβ int
+> 	}{}
+> 	b, err := Marshal(v)
+> 	if err != nil {
+> 		t.Fatal("Marshal:", err)
+> 	}
+> 	want := `{"A0":0,"À":0,"Aβ":0}`
+> 	got := string(b)
+> 	if got != want {
+> 		t.Fatalf("Marshal: got %s want %s", got, want)
+> 	}
+> }
+> 
+> func TestMarshalerError(t *testing.T) {
+> 	s := "test variable"
+> 	st := reflect.TypeOf(s)
+> 	errText := "json: test error"
+> 
+> 	tests := []struct {
+> 		err  *MarshalerError
+> 		want string
+> 	}{
+> 		{
+> 			&MarshalerError{st, fmt.Errorf(errText), ""},
+> 			"json: error calling MarshalJSON for type " + st.String() + ": " + errText,
+> 		},
+> 		{
+> 			&MarshalerError{st, fmt.Errorf(errText), "TestMarshalerError"},
+> 			"json: error calling TestMarshalerError for type " + st.String() + ": " + errText,
+> 		},
+> 	}
+> 
+> 	for i, tt := range tests {
+> 		got := tt.err.Error()
+> 		if got != tt.want {
+> 			t.Errorf("MarshalerError test %d, got: %s, want: %s", i, got, tt.want)
+> 		}
+> 	}
+> }
+39,41c39,41
+< 		{"Name": "Platypus", "Order": "Monotremata"},
+< 		{"Name": "Quoll",    "Order": "Dasyuromorphia"}
+< 	]`)
+---
+> 	{"Name": "Platypus", "Order": "Monotremata"},
+> 	{"Name": "Quoll",    "Order": "Dasyuromorphia"}
+> ]`)
+59,64c59,64
+< 		{"Name": "Ed", "Text": "Knock knock."}
+< 		{"Name": "Sam", "Text": "Who's there?"}
+< 		{"Name": "Ed", "Text": "Go fmt."}
+< 		{"Name": "Sam", "Text": "Go fmt who?"}
+< 		{"Name": "Ed", "Text": "Go fmt yourself!"}
+< 	`
+---
+> 	{"Name": "Ed", "Text": "Knock knock."}
+> 	{"Name": "Sam", "Text": "Who's there?"}
+> 	{"Name": "Ed", "Text": "Go fmt."}
+> 	{"Name": "Sam", "Text": "Go fmt who?"}
+> 	{"Name": "Ed", "Text": "Go fmt yourself!"}
+> `
+89,90c89,90
+< 		{"Message": "Hello", "Array": [1, 2, 3], "Null": null, "Number": 1.234}
+< 	`
+---
+> 	{"Message": "Hello", "Array": [1, 2, 3], "Null": null, "Number": 1.234}
+> `
+173d172
+< 
+194,196c193,195
+< 		{"Space": "YCbCr", "Point": {"Y": 255, "Cb": 0, "Cr": -10}},
+< 		{"Space": "RGB",   "Point": {"R": 98, "G": 218, "B": 255}}
+< 	]`)
+---
+> 	{"Space": "YCbCr", "Point": {"Y": 255, "Cb": 0, "Cr": -10}},
+> 	{"Space": "RGB",   "Point": {"R": 98, "G": 218, "B": 255}}
+> ]`)
+275a275,310
+> 
+> func ExampleMarshalIndent() {
+> 	data := map[string]int{
+> 		"a": 1,
+> 		"b": 2,
+> 	}
+> 
+> 	b, err := json.MarshalIndent(data, "<prefix>", "<indent>")
+> 	if err != nil {
+> 		log.Fatal(err)
+> 	}
+> 
+> 	fmt.Println(string(b))
+> 	// Output:
+> 	// {
+> 	// <prefix><indent>"a": 1,
+> 	// <prefix><indent>"b": 2
+> 	// <prefix>}
+> }
+> 
+> func ExampleValid() {
+> 	goodJSON := `{"example": 1}`
+> 	badJSON := `{"example":2:]}}`
+> 
+> 	fmt.Println(json.Valid([]byte(goodJSON)), json.Valid([]byte(badJSON)))
+> 	// Output:
+> 	// true false
+> }
+> 
+> func ExampleHTMLEscape() {
+> 	var out bytes.Buffer
+> 	json.HTMLEscape(&out, []byte(`{"Name":"<b>HTML content</b>"}`))
+> 	out.WriteTo(os.Stdout)
+> 	// Output:
+> 	//{"Name":"\u003cb\u003eHTML content\u003c/b\u003e"}
+> }
+7c7,9
+< import "bytes"
+---
+> import (
+> 	"bytes"
+> )
+17,18c19,20
+< 	var scan scanner
+< 	scan.reset()
+---
+> 	scan := newScanner()
+> 	defer freeScanner(scan)
+31c33
+< 		if c == 0xE2 && i+2 < len(src) && src[i+1] == 0x80 && src[i+2]&^1 == 0xA8 {
+---
+> 		if escape && c == 0xE2 && i+2 < len(src) && src[i+1] == 0x80 && src[i+2]&^1 == 0xA8 {
+39c41
+< 		v := scan.step(&scan, c)
+---
+> 		v := scan.step(scan, c)
+81,82c83,84
+< 	var scan scanner
+< 	scan.reset()
+---
+> 	scan := newScanner()
+> 	defer freeScanner(scan)
+87c89
+< 		v := scan.step(&scan, c)
+---
+> 		v := scan.step(scan, c)
+13c13
+< 	// From: http://stackoverflow.com/a/13340826
+---
+> 	// From: https://stackoverflow.com/a/13340826
+11c11
+< // in this package (Compact, Indent, checkValid, nextValue, etc).
+---
+> // in this package (Compact, Indent, checkValid, etc).
+16c16,19
+< import "strconv"
+---
+> import (
+> 	"strconv"
+> 	"sync"
+> )
+20c23,25
+< 	return checkValid(data, &scanner{}) == nil
+---
+> 	scan := newScanner()
+> 	defer freeScanner(scan)
+> 	return checkValid(data, scan) == nil
+39,67d43
+< // nextValue splits data after the next whole JSON value,
+< // returning that value and the bytes that follow it as separate slices.
+< // scan is passed in for use by nextValue to avoid an allocation.
+< func nextValue(data []byte, scan *scanner) (value, rest []byte, err error) {
+< 	scan.reset()
+< 	for i, c := range data {
+< 		v := scan.step(scan, c)
+< 		if v >= scanEndObject {
+< 			switch v {
+< 			// probe the scanner with a space to determine whether we will
+< 			// get scanEnd on the next character. Otherwise, if the next character
+< 			// is not a space, scanEndTop allocates a needless error.
+< 			case scanEndObject, scanEndArray:
+< 				if scan.step(scan, ' ') == scanEnd {
+< 					return data[:i+1], data[i+1:], nil
+< 				}
+< 			case scanError:
+< 				return nil, nil, scan.err
+< 			case scanEnd:
+< 				return data[:i], data[i:], nil
+< 			}
+< 		}
+< 	}
+< 	if scan.eof() == scanError {
+< 		return nil, nil, scan.err
+< 	}
+< 	return data, nil, nil
+< }
+< 
+77c53
+< // Callers call scan.reset() and then pass bytes in one at a time
+---
+> // Callers call scan.reset and then pass bytes in one at a time
+104,109c80,81
+< 	// 1-byte redo (see undo method)
+< 	redo      bool
+< 	redoCode  int
+< 	redoState func(*scanner, byte) int
+< 
+< 	// total bytes consumed, updated by decoder.Decode
+---
+> 	// total bytes consumed, updated by decoder.Decode (and deliberately
+> 	// not set to zero by scan.reset)
+112a85,106
+> var scannerPool = sync.Pool{
+> 	New: func() interface{} {
+> 		return &scanner{}
+> 	},
+> }
+> 
+> func newScanner() *scanner {
+> 	scan := scannerPool.Get().(*scanner)
+> 	// scan.reset by design doesn't set bytes to zero
+> 	scan.bytes = 0
+> 	scan.reset()
+> 	return scan
+> }
+> 
+> func freeScanner(scan *scanner) {
+> 	// Avoid hanging on to too much memory in extreme cases.
+> 	if len(scan.parseState) > 1024 {
+> 		scan.parseState = nil
+> 	}
+> 	scannerPool.Put(scan)
+> }
+> 
+147a142,145
+> // This limits the max nesting depth to prevent stack overflow.
+> // This is permitted by https://tools.ietf.org/html/rfc7159#section-9
+> const maxNestingDepth = 10000
+> 
+154d151
+< 	s.redo = false
+178,179c175,181
+< func (s *scanner) pushParseState(p int) {
+< 	s.parseState = append(s.parseState, p)
+---
+> // an error state is returned if maxNestingDepth was exceeded, otherwise successState is returned.
+> func (s *scanner) pushParseState(c byte, newParseState int, successState int) int {
+> 	s.parseState = append(s.parseState, newParseState)
+> 	if len(s.parseState) <= maxNestingDepth {
+> 		return successState
+> 	}
+> 	return s.error(c, "exceeded max depth")
+187d188
+< 	s.redo = false
+197c198
+< 	return c == ' ' || c == '\t' || c == '\r' || c == '\n'
+---
+> 	return c <= ' ' && (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+202c203
+< 	if c <= ' ' && isSpace(c) {
+---
+> 	if isSpace(c) {
+213c214
+< 	if c <= ' ' && isSpace(c) {
+---
+> 	if isSpace(c) {
+219,220c220
+< 		s.pushParseState(parseObjectKey)
+< 		return scanBeginObject
+---
+> 		return s.pushParseState(c, parseObjectKey, scanBeginObject)
+223,224c223
+< 		s.pushParseState(parseArrayValue)
+< 		return scanBeginArray
+---
+> 		return s.pushParseState(c, parseArrayValue, scanBeginArray)
+253c252
+< 	if c <= ' ' && isSpace(c) {
+---
+> 	if isSpace(c) {
+266c265
+< 	if c <= ' ' && isSpace(c) {
+---
+> 	if isSpace(c) {
+286c285
+< 	if c <= ' ' && isSpace(c) {
+---
+> 	if isSpace(c) {
+328c327
+< 	if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+---
+> 	if !isSpace(c) {
+610,628d608
+< 
+< // undo causes the scanner to return scanCode from the next state transition.
+< // This gives callers a simple 1-byte undo mechanism.
+< func (s *scanner) undo(scanCode int) {
+< 	if s.redo {
+< 		panic("json: invalid use of scanner")
+< 	}
+< 	s.redoCode = scanCode
+< 	s.redoState = s.step
+< 	s.step = stateRedo
+< 	s.redo = true
+< }
+< 
+< // stateRedo helps implement the scanner's 1-byte undo.
+< func stateRedo(s *scanner, c byte) int {
+< 	s.redo = false
+< 	s.step = s.redoState
+< 	return s.redoCode
+< }
+50a51
+> 	{"{\"\":\"<>&\u2028\u2029\"}", "{\n\t\"\": \"<>&\u2028\u2029\"\n}"}, // See golang.org/issue/34070
+92,93c93,94
+< 		{"{\"\u2028\": 1}", `{"\u2028":1}`},
+< 		{"{\"\u2029\" :2}", `{"\u2029":2}`},
+---
+> 		{"{\"\u2028\": 1}", "{\"\u2028\":1}"},
+> 		{"{\"\u2029\" :2}", "{\"\u2029\":2}"},
+203,239d203
+< func TestNextValueBig(t *testing.T) {
+< 	initBig()
+< 	var scan scanner
+< 	item, rest, err := nextValue(jsonBig, &scan)
+< 	if err != nil {
+< 		t.Fatalf("nextValue: %s", err)
+< 	}
+< 	if len(item) != len(jsonBig) || &item[0] != &jsonBig[0] {
+< 		t.Errorf("invalid item: %d %d", len(item), len(jsonBig))
+< 	}
+< 	if len(rest) != 0 {
+< 		t.Errorf("invalid rest: %d", len(rest))
+< 	}
+< 
+< 	item, rest, err = nextValue(append(jsonBig, "HELLO WORLD"...), &scan)
+< 	if err != nil {
+< 		t.Fatalf("nextValue extra: %s", err)
+< 	}
+< 	if len(item) != len(jsonBig) {
+< 		t.Errorf("invalid item: %d %d", len(item), len(jsonBig))
+< 	}
+< 	if string(rest) != "HELLO WORLD" {
+< 		t.Errorf("invalid rest: %d", len(rest))
+< 	}
+< }
+< 
+< var benchScan scanner
+< 
+< func BenchmarkSkipValue(b *testing.B) {
+< 	initBig()
+< 	b.ResetTimer()
+< 	for i := 0; i < b.N; i++ {
+< 		nextValue(jsonBig, &benchScan)
+< 	}
+< 	b.SetBytes(int64(len(jsonBig)))
+< }
+< 
+15,20c15,21
+< 	r     io.Reader
+< 	buf   []byte
+< 	d     decodeState
+< 	scanp int // start of unread data in buf
+< 	scan  scanner
+< 	err   error
+---
+> 	r       io.Reader
+> 	buf     []byte
+> 	d       decodeState
+> 	scanp   int   // start of unread data in buf
+> 	scanned int64 // amount of data already scanned
+> 	scan    scanner
+> 	err     error
+37a39,43
+> // DisallowUnknownFields causes the Decoder to return an error when the destination
+> // is a struct and the input contains object keys which do not match any
+> // non-ignored, exported fields in the destination.
+> func (dec *Decoder) DisallowUnknownFields() { dec.d.disallowUnknownFields = true }
+> 
+53c59
+< 		return &SyntaxError{msg: "not at beginning of value"}
+---
+> 		return &SyntaxError{msg: "not at beginning of value", Offset: dec.InputOffset()}
+89c95,98
+< 	for {
+---
+> 	// help the compiler see that scanp is never negative, so it can remove
+> 	// some bounds checks below.
+> 	for scanp >= 0 {
+> 
+91c100,101
+< 		for i, c := range dec.buf[scanp:] {
+---
+> 		for ; scanp < len(dec.buf); scanp++ {
+> 			c := dec.buf[scanp]
+93,95c103,108
+< 			v := dec.scan.step(&dec.scan, c)
+< 			if v == scanEnd {
+< 				scanp += i
+---
+> 			switch dec.scan.step(&dec.scan, c) {
+> 			case scanEnd:
+> 				// scanEnd is delayed one byte so we decrement
+> 				// the scanner bytes count by 1 to ensure that
+> 				// this value is correct in the next call of Decode.
+> 				dec.scan.bytes--
+97,105c110,118
+< 			}
+< 			// scanEnd is delayed one byte.
+< 			// We might block trying to get that byte from src,
+< 			// so instead invent a space byte.
+< 			if (v == scanEndObject || v == scanEndArray) && dec.scan.step(&dec.scan, ' ') == scanEnd {
+< 				scanp += i + 1
+< 				break Input
+< 			}
+< 			if v == scanError {
+---
+> 			case scanEndObject, scanEndArray:
+> 				// scanEnd is delayed one byte.
+> 				// We might block trying to get that byte from src,
+> 				// so instead invent a space byte.
+> 				if stateEndValue(&dec.scan, ' ') == scanEnd {
+> 					scanp++
+> 					break Input
+> 				}
+> 			case scanError:
+110d122
+< 		scanp = len(dec.buf)
+137a150
+> 		dec.scanned += int64(dec.scanp)
+304c317
+< 			return &SyntaxError{"expected comma after array element", 0}
+---
+> 			return &SyntaxError{"expected comma after array element", dec.InputOffset()}
+314c327
+< 			return &SyntaxError{"expected colon after object key", 0}
+---
+> 			return &SyntaxError{"expected colon after object key", dec.InputOffset()}
+431d443
+< 					clearOffset(err)
+445d456
+< 				clearOffset(err)
+453,458d463
+< func clearOffset(err error) {
+< 	if s, ok := err.(*SyntaxError); ok {
+< 		s.Offset = 0
+< 	}
+< }
+< 
+475c480
+< 	return nil, &SyntaxError{"invalid character " + quoteChar(c) + " " + context, 0}
+---
+> 	return nil, &SyntaxError{"invalid character " + quoteChar(c) + context, dec.InputOffset()}
+504,516c509,513
+< /*
+< TODO
+< 
+< // EncodeToken writes the given JSON token to the stream.
+< // It returns an error if the delimiters [ ] { } are not properly used.
+< //
+< // EncodeToken does not call Flush, because usually it is part of
+< // a larger operation such as Encode, and those will call Flush when finished.
+< // Callers that create an Encoder and then invoke EncodeToken directly,
+< // without using Encode, need to call Flush when finished to ensure that
+< // the JSON is written to the underlying writer.
+< func (e *Encoder) EncodeToken(t Token) error  {
+< 	...
+---
+> // InputOffset returns the input stream byte offset of the current decoder position.
+> // The offset gives the location of the end of the most recently returned token
+> // and the beginning of the next token.
+> func (dec *Decoder) InputOffset() int64 {
+> 	return dec.scanned + int64(dec.scanp)
+518,519d514
+< 
+< */
+10d9
+< 	"io/ioutil"
+92a92,103
+> type strMarshaler string
+> 
+> func (s strMarshaler) MarshalJSON() ([]byte, error) {
+> 	return []byte(s), nil
+> }
+> 
+> type strPtrMarshaler string
+> 
+> func (s *strPtrMarshaler) MarshalJSON() ([]byte, error) {
+> 	return []byte(*s), nil
+> }
+> 
+95a107,124
+> 	var tagStruct struct {
+> 		Valid   int `json:"<>&#! "`
+> 		Invalid int `json:"\\"`
+> 	}
+> 
+> 	// This case is particularly interesting, as we force the encoder to
+> 	// take the address of the Ptr field to use its MarshalJSON method. This
+> 	// is why the '&' is important.
+> 	marshalerStruct := &struct {
+> 		NonPtr strMarshaler
+> 		Ptr    strPtrMarshaler
+> 	}{`"<str>"`, `"<str>"`}
+> 
+> 	// https://golang.org/issue/34154
+> 	stringOption := struct {
+> 		Bar string `json:"bar,string"`
+> 	}{`<html>foobar</html>`}
+> 
+104a134,148
+> 		{
+> 			"tagStruct", tagStruct,
+> 			`{"\u003c\u003e\u0026#! ":0,"Invalid":0}`,
+> 			`{"<>&#! ":0,"Invalid":0}`,
+> 		},
+> 		{
+> 			`"<str>"`, marshalerStruct,
+> 			`{"NonPtr":"\u003cstr\u003e","Ptr":"\u003cstr\u003e"}`,
+> 			`{"NonPtr":"<str>","Ptr":"<str>"}`,
+> 		},
+> 		{
+> 			"stringOption", stringOption,
+> 			`{"bar":"\"\\u003chtml\\u003efoobar\\u003c/html\\u003e\""}`,
+> 			`{"bar":"\"<html>foobar</html>\""}`,
+> 		},
+109c153,154
+< 			t.Fatalf("Encode(%s): %s", tt.name, err)
+---
+> 			t.Errorf("Encode(%s): %s", tt.name, err)
+> 			continue
+117c162,163
+< 			t.Fatalf("SetEscapeHTML(false) Encode(%s): %s", tt.name, err)
+---
+> 			t.Errorf("SetEscapeHTML(false) Encode(%s): %s", tt.name, err)
+> 			continue
+171c217
+< 	rest, err := ioutil.ReadAll(d.Buffered())
+---
+> 	rest, err := io.ReadAll(d.Buffered())
+195d240
+< 	// TODO(rsc): Should not need the * in *RawMessage
+198c243
+< 		Id *RawMessage
+---
+> 		Id RawMessage
+207,208c252,253
+< 	if string([]byte(*data.Id)) != raw {
+< 		t.Fatalf("Raw mismatch: have %#q want %#q", []byte(*data.Id), raw)
+---
+> 	if string([]byte(data.Id)) != raw {
+> 		t.Fatalf("Raw mismatch: have %#q want %#q", []byte(data.Id), raw)
+220d264
+< 	// TODO(rsc): Should not need the * in *RawMessage
+222,224c266,269
+< 		X  float64
+< 		Id *RawMessage
+< 		Y  float32
+---
+> 		X     float64
+> 		Id    RawMessage
+> 		IdPtr *RawMessage
+> 		Y     float32
+226,227c271
+< 	data.Id = new(RawMessage)
+< 	const msg = `{"X":0.1,"Id":null,"Y":0.2}`
+---
+> 	const msg = `{"X":0.1,"Id":null,"IdPtr":null,"Y":0.2}`
+232,233c276,280
+< 	if data.Id != nil {
+< 		t.Fatalf("Raw mismatch: have non-nil, want nil")
+---
+> 	if want, got := "null", string(data.Id); want != got {
+> 		t.Fatalf("Raw mismatch: have %q, want %q", got, want)
+> 	}
+> 	if data.IdPtr != nil {
+> 		t.Fatalf("Raw pointer mismatch: have non-nil, want nil")
+273c320
+< 			if err := NewEncoder(ioutil.Discard).Encode(v); err != nil {
+---
+> 			if err := NewEncoder(io.Discard).Encode(v); err != nil {
+289c336
+< var tokenStreamCases []tokenStreamCase = []tokenStreamCase{
+---
+> var tokenStreamCases = []tokenStreamCase{
+345c392
+< 		decodeThis{&SyntaxError{"expected comma after array element", 0}},
+---
+> 		decodeThis{&SyntaxError{"expected comma after array element", 11}},
+347,349c394,403
+< 	{json: `{ "a" 1 }`, expTokens: []interface{}{
+< 		Delim('{'), "a",
+< 		decodeThis{&SyntaxError{"expected colon after object key", 0}},
+---
+> 	{json: `{ "` + strings.Repeat("a", 513) + `" 1 }`, expTokens: []interface{}{
+> 		Delim('{'), strings.Repeat("a", 513),
+> 		decodeThis{&SyntaxError{"expected colon after object key", 518}},
+> 	}},
+> 	{json: `{ "\a" }`, expTokens: []interface{}{
+> 		Delim('{'),
+> 		&SyntaxError{"invalid character 'a' in string escape code", 3},
+> 	}},
+> 	{json: ` \a`, expTokens: []interface{}{
+> 		&SyntaxError{"invalid character '\\\\' looking for beginning of value", 1},
+354d407
+< 
+370,371c423,424
+< 				if err == nil || err.Error() != experr.Error() {
+< 					t.Errorf("case %v: Expected error %v in %q, but was %v", ci, experr, tcase.json, err)
+---
+> 				if err == nil || !reflect.DeepEqual(err, experr) {
+> 					t.Errorf("case %v: Expected error %#v in %q, but was %#v", ci, experr, tcase.json, err)
+378c431
+< 				t.Errorf("case %v: Unexpected error '%v' in %q", ci, err, tcase.json)
+---
+> 				t.Errorf("case %v: Unexpected error '%#v' in %q", ci, err, tcase.json)
+387d439
+< 
+44c44
+< 	V string `json:"!#$%&()*+-./:<=>?@[]^_{|}~"` // https://golang.org/issue/3546
+---
+> 	V string `json:"!#$%&()*+-./:;<=>?@[]^_{|}~ "` // https://golang.org/issue/3546
+93c93
+< 	{punctuationTag{"Union Rags"}, "Union Rags", "!#$%&()*+-./:<=>?@[]^_{|}~"},
+---
+> 	{punctuationTag{"Union Rags"}, "Union Rags", "!#$%&()*+-./:;<=>?@[]^_{|}~ "},
